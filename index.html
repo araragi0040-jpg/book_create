@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>縦書きドキュメント v001</title>
+  <title>縦書きドキュメント v002</title>
   <link rel="stylesheet" href="./style.css" />
 </head>
 <body>
@@ -43,6 +43,18 @@
       <option value="1" selected>100%</option>
       <option value="1.25">125%</option>
       <option value="1.5">150%</option>
+    </select>
+    <div class="divider"></div>
+    <select id="paperSizeSelect" class="select paper-size-select" aria-label="用紙サイズ" title="用紙サイズ">
+      <option value="A4" selected>A4</option>
+      <option value="A5">A5</option>
+      <option value="B5">B5</option>
+      <option value="B6">B6</option>
+      <option value="LETTER">Letter</option>
+    </select>
+    <select id="paperOrientationSelect" class="select paper-orientation-select" aria-label="用紙の向き" title="用紙の向き">
+      <option value="portrait" selected>縦長</option>
+      <option value="landscape">横長</option>
     </select>
     <div class="divider"></div>
     <select id="blockSelect" class="select" aria-label="段落スタイル">
@@ -89,7 +101,8 @@
   <footer class="statusbar">
     <span id="charCount">0 文字</span>
     <span id="directionState">縦書き / 右→左</span>
-    <span>v001</span>
+    <span id="paperState">A4 / 縦長</span>
+    <span>v002</span>
   </footer>
 
   <dialog id="findDialog" class="dialog">
@@ -110,7 +123,7 @@
   <dialog id="exportDialog" class="dialog">
     <form method="dialog" class="dialog-card" onsubmit="return false;">
       <div class="dialog-title">書き出し</div>
-      <p class="dialog-note">v001では、テキストとWord互換HTML（.doc）に対応しています。</p>
+      <p class="dialog-note">v002では、テキストとWord互換HTML（.doc）に対応しています。用紙サイズ・向きもHTML出力へ反映します。</p>
       <div class="export-grid">
         <button id="exportTxtBtn" type="button" class="export-option">TXT<br><small>本文のみ</small></button>
         <button id="exportDocBtn" type="button" class="export-option">Word (.doc)<br><small>縦書き書式付き</small></button>
