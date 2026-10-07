@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>縦書きドキュメント v001</title>
+  <link rel="stylesheet" href="./style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand-mark" aria-hidden="true">縦</div>
+    <div class="doc-head">
+      <div class="title-row">
+        <input id="docTitle" class="doc-title" value="無題のドキュメント" aria-label="文書タイトル" />
+        <span id="saveState" class="save-state">保存済み</span>
+      </div>
+      <nav class="menu-row" aria-label="メインメニュー">
+        <button class="menu-btn" data-menu="file">ファイル</button>
+        <button class="menu-btn" data-menu="edit">編集</button>
+        <button class="menu-btn" data-menu="view">表示</button>
+        <button class="menu-btn" data-menu="insert">挿入</button>
+        <button class="menu-btn" data-menu="format">書式</button>
+        <button class="menu-btn" data-menu="tools">ツール</button>
+      </nav>
+    </div>
+    <div class="top-actions">
+      <button id="newDoc" class="ghost-btn">新規</button>
+      <button id="exportBtn" class="primary-btn">書き出し</button>
+    </div>
+  </header>
+
+  <div id="menuPanel" class="menu-panel" hidden></div>
+
+  <section class="toolbar" aria-label="書式ツールバー">
+    <div class="tool-group">
+      <button id="undoBtn" class="icon-btn" title="元に戻す Ctrl+Z">↶</button>
+      <button id="redoBtn" class="icon-btn" title="やり直す Ctrl+Y">↷</button>
+      <button id="printBtn" class="icon-btn" title="印刷">🖨</button>
+    </div>
+    <div class="divider"></div>
+    <select id="zoomSelect" class="select compact" aria-label="ズーム">
+      <option value="0.75">75%</option>
+      <option value="1" selected>100%</option>
+      <option value="1.25">125%</option>
+      <option value="1.5">150%</option>
+    </select>
+    <div class="divider"></div>
+    <select id="blockSelect" class="select" aria-label="段落スタイル">
+      <option value="p">標準テキスト</option>
+      <option value="h1">見出し 1</option>
+      <option value="h2">見出し 2</option>
+      <option value="blockquote">引用</option>
+    </select>
+    <select id="fontSelect" class="select font-select" aria-label="フォント">
+      <option value="Noto Serif JP">Noto Serif JP</option>
+      <option value="Yu Mincho">游明朝</option>
+      <option value="Hiragino Mincho ProN">ヒラギノ明朝</option>
+      <option value="Yu Gothic">游ゴシック</option>
+      <option value="sans-serif">ゴシック</option>
+    </select>
+    <select id="fontSizeSelect" class="select compact" aria-label="文字サイズ">
+      <option value="2">10</option>
+      <option value="3" selected>12</option>
+      <option value="4">14</option>
+      <option value="5">18</option>
+      <option value="6">24</option>
+      <option value="7">36</option>
+    </select>
+    <div class="divider"></div>
+    <button id="boldBtn" class="format-btn" title="太字 Ctrl+B"><b>B</b></button>
+    <button id="italicBtn" class="format-btn" title="斜体 Ctrl+I"><i>I</i></button>
+    <button id="underlineBtn" class="format-btn" title="下線 Ctrl+U"><u>U</u></button>
+    <div class="divider"></div>
+    <button id="findBtn" class="format-btn wide" title="検索 Ctrl+F">検索</button>
+    <button id="directionBtn" class="direction-btn" aria-pressed="true">縦書き</button>
+  </section>
+
+  <main class="workspace">
+    <div class="ruler" aria-hidden="true">
+      <span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span>
+    </div>
+    <div id="paperStage" class="paper-stage">
+      <article id="paper" class="paper vertical" aria-label="文書編集領域">
+        <div id="editor" class="editor" contenteditable="true" spellcheck="false" data-placeholder="ここに文章を入力"></div>
+      </article>
+    </div>
+  </main>
+
+  <footer class="statusbar">
+    <span id="charCount">0 文字</span>
+    <span id="directionState">縦書き / 右→左</span>
+    <span>v001</span>
+  </footer>
+
+  <dialog id="findDialog" class="dialog">
+    <form method="dialog" class="dialog-card" onsubmit="return false;">
+      <div class="dialog-title">検索と置換</div>
+      <label>検索<input id="findInput" type="text" /></label>
+      <label>置換<input id="replaceInput" type="text" /></label>
+      <div class="dialog-actions">
+        <button id="findNextBtn" type="button" class="ghost-btn">次を検索</button>
+        <button id="replaceOneBtn" type="button" class="ghost-btn">置換</button>
+        <button id="replaceAllBtn" type="button" class="primary-btn">すべて置換</button>
+        <button id="closeFindBtn" type="button" class="ghost-btn">閉じる</button>
+      </div>
+      <div id="findMessage" class="dialog-note"></div>
+    </form>
+  </dialog>
+
+  <dialog id="exportDialog" class="dialog">
+    <form method="dialog" class="dialog-card" onsubmit="return false;">
+      <div class="dialog-title">書き出し</div>
+      <p class="dialog-note">v001では、テキストとWord互換HTML（.doc）に対応しています。</p>
+      <div class="export-grid">
+        <button id="exportTxtBtn" type="button" class="export-option">TXT<br><small>本文のみ</small></button>
+        <button id="exportDocBtn" type="button" class="export-option">Word (.doc)<br><small>縦書き書式付き</small></button>
+        <button id="exportHtmlBtn" type="button" class="export-option">HTML<br><small>編集状態を保持</small></button>
+      </div>
+      <div class="dialog-actions end">
+        <button id="closeExportBtn" type="button" class="ghost-btn">閉じる</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script src="./app.js"></script>
+</body>
+</html>
