@@ -11,8 +11,8 @@
   const paperState = $('paperState');
   const menuPanel = $('menuPanel');
   const tabsList = $('tabsList');
-  const STORAGE_KEY = 'tategaki-docs-v003';
-  const LEGACY_STORAGE_KEYS = ['tategaki-docs-v002', 'tategaki-docs-v001'];
+  const STORAGE_KEY = 'tategaki-docs-v004';
+  const LEGACY_STORAGE_KEYS = ['tategaki-docs-v003', 'tategaki-docs-v002', 'tategaki-docs-v001'];
   let saveTimer = null;
   let currentDirection = 'vertical';
   let currentLatinOrientation = 'mixed';
@@ -21,6 +21,7 @@
   let lastFindIndex = -1;
   let tabs = [];
   let activeTabId = null;
+  let savedEditorRange = null;
 
   const PAPER_SIZES = {
     A4: { label: 'A4', width: 210, height: 297 },
@@ -103,14 +104,33 @@
     scheduleSave();
   }
 
+  function restoreEditorSelection() {
+    if (!savedEditorRange) return false;
+    const sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(savedEditorRange.cloneRange());
+    return true;
+  }
+
+  function rememberEditorSelection() {
+    const sel = window.getSelection();
+    if (!sel || !sel.rangeCount) return;
+    const range = sel.getRangeAt(0);
+    const common = range.commonAncestorContainer;
+    const node = common.nodeType === Node.ELEMENT_NODE ? common : common.parentNode;
+    if (node && editor.contains(node)) savedEditorRange = range.cloneRange();
+  }
+
   function applyFontSize(pt) {
     const size = Math.max(6, Math.min(200, Number(pt) || 12));
     $('fontSizeInput').value = String(size);
     editor.focus();
+    restoreEditorSelection();
     document.execCommand('styleWithCSS', false, false);
     document.execCommand('fontSize', false, '7');
     document.execCommand('styleWithCSS', false, true);
     normalizeCustomFontSizes(size);
+    rememberEditorSelection();
     syncActiveTab();
     scheduleSave();
   }
@@ -193,7 +213,62 @@
     editor.focus();
   }
 
+  function selectionIsInsideEditor(range) {
+    if (!range) return false;
+    const common = range.commonAncestorContainer;
+    const node = common.nodeType === Node.ELEMENT_NODE ? common : common.parentNode;
+    return !!(node && editor.contains(node));
+  }
+
+  function selectedTextOrientation(range) {
+    if (!range) return currentLatinOrientation;
+    const container = range.startContainer.nodeType === Node.ELEMENT_NODE
+      ? range.startContainer
+      : range.startContainer.parentElement;
+    if (!container) return currentLatinOrientation;
+    const inline = container.closest?.('[data-latin-orientation]');
+    if (inline && editor.contains(inline)) return inline.dataset.latinOrientation || currentLatinOrientation;
+    return currentLatinOrientation;
+  }
+
+  function wrapSelectedTextOrientation(orientation) {
+    restoreEditorSelection();
+    const sel = window.getSelection();
+    if (!sel || !sel.rangeCount) return false;
+    const range = sel.getRangeAt(0);
+    if (range.collapsed || !selectionIsInsideEditor(range)) return false;
+
+    const fragment = range.extractContents();
+    const span = document.createElement('span');
+    span.dataset.latinOrientation = orientation;
+    span.style.textOrientation = orientation;
+    span.appendChild(fragment);
+    range.insertNode(span);
+
+    const nextRange = document.createRange();
+    nextRange.selectNodeContents(span);
+    sel.removeAllRanges();
+    sel.addRange(nextRange);
+    savedEditorRange = nextRange.cloneRange();
+    syncActiveTab();
+    scheduleSave();
+    updateCount();
+    return true;
+  }
+
   function toggleLatinOrientation() {
+    const range = savedEditorRange?.cloneRange();
+    if (range && !range.collapsed && selectionIsInsideEditor(range)) {
+      const current = selectedTextOrientation(range);
+      const next = current === 'upright' ? 'mixed' : 'upright';
+      if (wrapSelectedTextOrientation(next)) {
+        latinOrientationBtn.textContent = next === 'upright' ? '英字：縦' : '英字：横';
+        latinOrientationBtn.setAttribute('aria-pressed', next === 'upright' ? 'true' : 'false');
+        editor.focus();
+        return;
+      }
+    }
+
     currentLatinOrientation = currentLatinOrientation === 'mixed' ? 'upright' : 'mixed';
     applyDirection();
     scheduleSave();
@@ -252,7 +327,12 @@
       const html = tab.id === activeTabId ? editor.innerHTML : tab.html;
       const count = countHtml(html);
       btn.innerHTML = `<span class="tab-label">${escapeHtml(tab.name || `タブ${index + 1}`)}</span><span class="tab-count">${count.toLocaleString('ja-JP')}字</span>`;
+      btn.title = `${tab.name || `タブ${index + 1}`}（ダブルクリックで名前変更）`;
       btn.addEventListener('click', () => switchTab(tab.id));
+      btn.addEventListener('dblclick', (e) => {
+        e.preventDefault();
+        renameTab(tab.id);
+      });
       tabsList.appendChild(btn);
     });
   }
@@ -279,6 +359,18 @@
     updateCount();
     scheduleSave();
     editor.focus();
+  }
+
+  function renameTab(id) {
+    const tab = tabs.find(t => t.id === id);
+    if (!tab) return;
+    const next = prompt('タブ名を変更', tab.name || '');
+    if (next === null) return;
+    const name = next.trim();
+    if (!name) return;
+    tab.name = name;
+    renderTabs();
+    scheduleSave();
   }
 
   function scheduleSave() {
@@ -720,10 +812,14 @@ h1{font-size:20pt}h2{font-size:16pt}blockquote{border-inline-start:3px solid #99
   editor.addEventListener('input', () => {
     const size = Number($('fontSizeInput').value || 12);
     normalizeCustomFontSizes(size);
+    rememberEditorSelection();
     syncActiveTab();
     scheduleSave();
     updateCount();
   });
+  editor.addEventListener('keyup', rememberEditorSelection);
+  editor.addEventListener('mouseup', rememberEditorSelection);
+  document.addEventListener('selectionchange', rememberEditorSelection);
   title.addEventListener('input', scheduleSave);
   $('newDoc').addEventListener('click', newDocument);
   $('exportBtn').addEventListener('click', () => $('exportDialog').showModal());
@@ -735,6 +831,7 @@ h1{font-size:20pt}h2{font-size:16pt}blockquote{border-inline-start:3px solid #99
   $('underlineBtn').addEventListener('click', () => cmd('underline'));
   $('findBtn').addEventListener('click', openFind);
   directionBtn.addEventListener('click', toggleDirection);
+  latinOrientationBtn.addEventListener('pointerdown', rememberEditorSelection);
   latinOrientationBtn.addEventListener('click', toggleLatinOrientation);
   $('addTabBtn').addEventListener('click', addTab);
   $('zoomSelect').addEventListener('change', (e) => setZoom(Number(e.target.value)));
@@ -742,6 +839,7 @@ h1{font-size:20pt}h2{font-size:16pt}blockquote{border-inline-start:3px solid #99
   $('paperOrientationSelect').addEventListener('change', (e) => setPaperOrientation(e.target.value));
   $('blockSelect').addEventListener('change', (e) => formatBlock(e.target.value));
   $('fontSelect').addEventListener('change', (e) => cmd('fontName', e.target.value));
+  $('fontSizeInput').addEventListener('pointerdown', rememberEditorSelection);
   $('fontSizeInput').addEventListener('change', (e) => applyFontSize(e.target.value));
   $('fontSizeInput').addEventListener('keydown', (e) => {
     if (e.key === 'Enter') { e.preventDefault(); applyFontSize(e.currentTarget.value); }
