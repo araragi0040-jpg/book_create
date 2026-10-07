@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>縦書きドキュメント v002</title>
+  <title>縦書きドキュメント v003</title>
   <link rel="stylesheet" href="./style.css" />
 </head>
 <body>
@@ -70,14 +70,10 @@
       <option value="Yu Gothic">游ゴシック</option>
       <option value="sans-serif">ゴシック</option>
     </select>
-    <select id="fontSizeSelect" class="select compact" aria-label="文字サイズ">
-      <option value="2">10</option>
-      <option value="3" selected>12</option>
-      <option value="4">14</option>
-      <option value="5">18</option>
-      <option value="6">24</option>
-      <option value="7">36</option>
-    </select>
+    <div class="font-size-control" title="文字サイズ">
+      <input id="fontSizeInput" class="font-size-input" type="number" min="6" max="200" step="1" value="12" aria-label="文字サイズ" />
+      <span class="font-size-unit">pt</span>
+    </div>
     <div class="divider"></div>
     <button id="boldBtn" class="format-btn" title="太字 Ctrl+B"><b>B</b></button>
     <button id="italicBtn" class="format-btn" title="斜体 Ctrl+I"><i>I</i></button>
@@ -85,6 +81,12 @@
     <div class="divider"></div>
     <button id="findBtn" class="format-btn wide" title="検索 Ctrl+F">検索</button>
     <button id="directionBtn" class="direction-btn" aria-pressed="true">縦書き</button>
+    <button id="latinOrientationBtn" class="direction-btn latin-btn" aria-pressed="false" title="縦書き時の英字の向き">英字：横</button>
+  </section>
+
+  <section class="tabs-bar" aria-label="文書タブ">
+    <div id="tabsList" class="tabs-list"></div>
+    <button id="addTabBtn" class="add-tab-btn" type="button" title="タブを追加" aria-label="タブを追加">＋</button>
   </section>
 
   <main class="workspace">
@@ -102,7 +104,7 @@
     <span id="charCount">0 文字</span>
     <span id="directionState">縦書き / 右→左</span>
     <span id="paperState">A4 / 縦長</span>
-    <span>v002</span>
+    <span>v003</span>
   </footer>
 
   <dialog id="findDialog" class="dialog">
@@ -123,11 +125,11 @@
   <dialog id="exportDialog" class="dialog">
     <form method="dialog" class="dialog-card" onsubmit="return false;">
       <div class="dialog-title">書き出し</div>
-      <p class="dialog-note">v002では、テキストとWord互換HTML（.doc）に対応しています。用紙サイズ・向きもHTML出力へ反映します。</p>
+      <p class="dialog-note">PDF / HTML / IDML の3形式で書き出せます。PDFはブラウザの印刷画面から「PDFに保存」を選択してください。</p>
       <div class="export-grid">
-        <button id="exportTxtBtn" type="button" class="export-option">TXT<br><small>本文のみ</small></button>
-        <button id="exportDocBtn" type="button" class="export-option">Word (.doc)<br><small>縦書き書式付き</small></button>
-        <button id="exportHtmlBtn" type="button" class="export-option">HTML<br><small>編集状態を保持</small></button>
+        <button id="exportPdfBtn" type="button" class="export-option">PDF<br><small>印刷画面から保存</small></button>
+        <button id="exportHtmlBtn" type="button" class="export-option">HTML<br><small>縦書き書式付き</small></button>
+        <button id="exportIdmlBtn" type="button" class="export-option">IDML<br><small>InDesign用</small></button>
       </div>
       <div class="dialog-actions end">
         <button id="closeExportBtn" type="button" class="ghost-btn">閉じる</button>
