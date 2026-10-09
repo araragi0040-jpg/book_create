@@ -12,8 +12,8 @@
   const paperState = $('paperState');
   const menuPanel = $('menuPanel');
   const tabsList = $('tabsList');
-  const STORAGE_KEY = 'tategaki-docs-v006';
-  const LEGACY_STORAGE_KEYS = ['tategaki-docs-v005', 'tategaki-docs-v004', 'tategaki-docs-v003', 'tategaki-docs-v002', 'tategaki-docs-v001'];
+  const STORAGE_KEY = 'tategaki-docs-v007';
+  const LEGACY_STORAGE_KEYS = ['tategaki-docs-v006', 'tategaki-docs-v005', 'tategaki-docs-v004', 'tategaki-docs-v003', 'tategaki-docs-v002', 'tategaki-docs-v001'];
   const PAGE_BREAK = '<!--TATEGAKI_PAGE_BREAK-->';
   let saveTimer = null;
   let currentDirection = 'vertical';
@@ -76,8 +76,7 @@
       ['150%', '', () => setZoom(1.5)]
     ],
     insert: [
-      ['改ページ', 'Ctrl+Enter', insertPageBreak],
-      ['現在日時', '', () => cmd('insertText', new Date().toLocaleString('ja-JP'))]
+      ['改ページ', 'Ctrl+Enter', insertPageBreak]
     ],
     format: [
       ['太字', 'Ctrl+B', () => cmd('bold')],
@@ -303,10 +302,48 @@
     }
   }
 
+  function createCaretMarker() {
+    const sel = window.getSelection();
+    if (!sel || !sel.rangeCount) return null;
+    const range = sel.getRangeAt(0);
+    if (!range.collapsed) return null;
+    const host = getPageEditors().find(pageEditor => pageEditor.contains(range.startContainer));
+    if (!host) return null;
+
+    const marker = document.createElement('span');
+    marker.dataset.tategakiCaretMarker = 'true';
+    marker.setAttribute('aria-hidden', 'true');
+    marker.style.cssText = 'display:inline-block;width:0;height:0;overflow:hidden;line-height:0;font-size:0;padding:0;margin:0;border:0;';
+    const markerRange = range.cloneRange();
+    markerRange.insertNode(marker);
+    return marker;
+  }
+
+  function restoreCaretFromMarker(marker) {
+    if (!marker || !marker.isConnected) return false;
+    const host = marker.closest('.editor');
+    if (!host) { marker.remove(); return false; }
+
+    const range = document.createRange();
+    range.setStartAfter(marker);
+    range.collapse(true);
+    marker.remove();
+    const sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+    setActiveEditor(host);
+    host.focus({ preventScroll: true });
+    savedEditorRange = range.cloneRange();
+    return true;
+  }
+
   function removeTrailingEmptyPages() {
     const editors = getPageEditors();
     for (let i = editors.length - 1; i > 0; i--) {
-      if ((editors[i].innerText || '').trim() || editors[i].querySelector('img,hr,table')) break;
+      const clone = editors[i].cloneNode(true);
+      clone.querySelectorAll('[data-tategaki-caret-marker]').forEach(node => node.remove());
+      // 改行だけのページも入力内容として保持する。自動生成直後でDOMが空のページだけ削除する。
+      if (clone.innerHTML.trim() !== '') break;
       editors[i].closest('.paper')?.remove();
     }
   }
@@ -314,7 +351,8 @@
   function paginateAllPages({ preserveCaret = true } = {}) {
     if (isPaginating) return;
     isPaginating = true;
-    const caretOffset = preserveCaret ? getGlobalCaretOffset() : null;
+    const caretMarker = preserveCaret ? createCaretMarker() : null;
+    const caretOffset = preserveCaret && !caretMarker ? getGlobalCaretOffset() : null;
     try {
       const editors = getPageEditors();
       for (let i = 0; i < editors.length; i++) {
@@ -330,7 +368,9 @@
     } finally {
       isPaginating = false;
     }
-    if (preserveCaret) restoreGlobalCaretOffset(caretOffset);
+    if (preserveCaret) {
+      if (!restoreCaretFromMarker(caretMarker)) restoreGlobalCaretOffset(caretOffset);
+    }
   }
 
   function repaginateActiveTab() {
@@ -355,6 +395,23 @@
     pageEditor.dataset.bound = 'true';
     pageEditor.addEventListener('focus', () => setActiveEditor(pageEditor));
     pageEditor.addEventListener('pointerdown', () => setActiveEditor(pageEditor));
+    pageEditor.addEventListener('keydown', (e) => {
+      const mod = e.ctrlKey || e.metaKey;
+      if (e.key !== 'Enter' || mod || e.altKey) return;
+
+      // Enterは常に本文の改行として扱う。保存は従来どおり自動保存で行う。
+      e.preventDefault();
+      setActiveEditor(pageEditor);
+      pageEditor.focus();
+      document.execCommand('insertLineBreak', false, null);
+      rememberEditorSelection();
+      requestAnimationFrame(() => {
+        paginateAllPages();
+        syncActiveTab();
+        scheduleSave();
+        updateCount();
+      });
+    });
     pageEditor.addEventListener('input', () => {
       setActiveEditor(pageEditor);
       const size = Number($('fontSizeInput').value || 12);
