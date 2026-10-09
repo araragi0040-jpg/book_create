@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>縦書きドキュメント v004</title>
+  <title>縦書きドキュメント v005</title>
   <link rel="stylesheet" href="./style.css" />
 </head>
 <body>
@@ -46,16 +46,17 @@
     </select>
     <div class="divider"></div>
     <select id="paperSizeSelect" class="select paper-size-select" aria-label="用紙サイズ" title="用紙サイズ">
-      <option value="A4" selected>A4</option>
-      <option value="A5">A5</option>
-      <option value="B5">B5</option>
-      <option value="B6">B6</option>
-      <option value="LETTER">Letter</option>
+      <option value="A4" selected>A4（210mm×297mm）</option>
+      <option value="A5">A5（148mm×210mm）</option>
+      <option value="B5">B5（182mm×257mm）</option>
+      <option value="B6">B6（128mm×182mm）</option>
+      <option value="LETTER">Letter（215.9mm×279.4mm）</option>
     </select>
     <select id="paperOrientationSelect" class="select paper-orientation-select" aria-label="用紙の向き" title="用紙の向き">
       <option value="portrait" selected>縦長</option>
       <option value="landscape">横長</option>
     </select>
+    <button id="marginBtn" class="format-btn wide" title="文字を書く範囲（余白）を設定">余白</button>
     <div class="divider"></div>
     <select id="blockSelect" class="select" aria-label="段落スタイル">
       <option value="p">標準テキスト</option>
@@ -94,9 +95,11 @@
       <span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span>
     </div>
     <div id="paperStage" class="paper-stage">
-      <article id="paper" class="paper vertical" aria-label="文書編集領域">
-        <div id="editor" class="editor" contenteditable="true" spellcheck="false" data-placeholder="ここに文章を入力"></div>
-      </article>
+      <div id="pagesContainer" class="pages-container">
+        <article id="paper" class="paper vertical" aria-label="文書編集領域">
+          <div id="editor" class="editor" contenteditable="true" spellcheck="false" data-placeholder="ここに文章を入力"></div>
+        </article>
+      </div>
     </div>
   </main>
 
@@ -104,7 +107,7 @@
     <span id="charCount">0 文字</span>
     <span id="directionState">縦書き / 右→左</span>
     <span id="paperState">A4 / 縦長</span>
-    <span>v004</span>
+    <span>v005</span>
   </footer>
 
   <dialog id="findDialog" class="dialog">
@@ -133,6 +136,23 @@
       </div>
       <div class="dialog-actions end">
         <button id="closeExportBtn" type="button" class="ghost-btn">閉じる</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="marginDialog" class="dialog">
+    <form method="dialog" class="dialog-card margin-dialog-card" onsubmit="return false;">
+      <div class="dialog-title">余白設定</div>
+      <p class="dialog-note">文字を書く範囲を、用紙端からの余白（mm）で指定します。</p>
+      <div class="margin-grid">
+        <label>上<input id="marginTopInput" type="number" min="0" max="100" step="1" value="18" /> mm</label>
+        <label>下<input id="marginBottomInput" type="number" min="0" max="100" step="1" value="18" /> mm</label>
+        <label>左<input id="marginLeftInput" type="number" min="0" max="100" step="1" value="18" /> mm</label>
+        <label>右<input id="marginRightInput" type="number" min="0" max="100" step="1" value="18" /> mm</label>
+      </div>
+      <div class="dialog-actions end">
+        <button id="closeMarginBtn" type="button" class="ghost-btn">キャンセル</button>
+        <button id="applyMarginBtn" type="button" class="primary-btn">適用</button>
       </div>
     </form>
   </dialog>

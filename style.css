@@ -159,7 +159,7 @@ button { color: inherit; }
   .topbar, .toolbar, .tabs-bar, .ruler, .statusbar { display: none !important; }
   body, .workspace, .paper-stage { background: white; padding: 0; margin: 0; }
   .paper { box-shadow: none; transform: none !important; }
-  .editor { padding: 18mm; }
+  .editor { padding: var(--margin-top, 18mm) var(--margin-right, 18mm) var(--margin-bottom, 18mm) var(--margin-left, 18mm); }
 }
 
 /* v003: numeric font size */
@@ -202,4 +202,32 @@ button { color: inherit; }
 
 @media (max-width: 760px) {
   .tabs-bar { top: 110px; padding-inline: 12px; }
+}
+
+/* v005: paper dimensions, margins, and automatic multi-page layout */
+.paper-size-select { width: 190px; max-width: 190px; }
+.pages-container {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 24px;
+}
+.editor {
+  padding: var(--margin-top, 18mm) var(--margin-right, 18mm) var(--margin-bottom, 18mm) var(--margin-left, 18mm);
+  overflow: hidden !important;
+}
+.margin-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+.margin-grid label {
+  grid-template-columns: 28px 1fr 26px;
+  align-items: center;
+}
+.margin-grid input { min-width: 0; width: 100%; }
+@media (max-width: 760px) {
+  .paper-size-select { width: 170px; max-width: 170px; }
+  .pages-container { align-items: flex-start; }
+  .margin-grid { grid-template-columns: 1fr; }
 }

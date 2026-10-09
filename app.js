@@ -1,7 +1,8 @@
 (() => {
   const $ = (id) => document.getElementById(id);
-  const editor = $('editor');
-  const paper = $('paper');
+  let editor = $('editor');
+  let paper = $('paper');
+  const pagesContainer = $('pagesContainer');
   const title = $('docTitle');
   const saveState = $('saveState');
   const charCount = $('charCount');
@@ -11,13 +12,16 @@
   const paperState = $('paperState');
   const menuPanel = $('menuPanel');
   const tabsList = $('tabsList');
-  const STORAGE_KEY = 'tategaki-docs-v004';
-  const LEGACY_STORAGE_KEYS = ['tategaki-docs-v003', 'tategaki-docs-v002', 'tategaki-docs-v001'];
+  const STORAGE_KEY = 'tategaki-docs-v005';
+  const LEGACY_STORAGE_KEYS = ['tategaki-docs-v004', 'tategaki-docs-v003', 'tategaki-docs-v002', 'tategaki-docs-v001'];
+  const PAGE_BREAK = '<!--TATEGAKI_PAGE_BREAK-->';
   let saveTimer = null;
   let currentDirection = 'vertical';
   let currentLatinOrientation = 'mixed';
   let currentPaperSize = 'A4';
   let currentPaperOrientation = 'portrait';
+  let currentMargins = { top: 18, bottom: 18, left: 18, right: 18 };
+  let isPaginating = false;
   let lastFindIndex = -1;
   let tabs = [];
   let activeTabId = null;
@@ -88,10 +92,286 @@
     ]
   };
 
+  function getPageEditors() {
+    return Array.from(pagesContainer.querySelectorAll('.editor'));
+  }
+
+  function getPagePapers() {
+    return Array.from(pagesContainer.querySelectorAll('.paper'));
+  }
+
+  function setActiveEditor(nextEditor) {
+    if (!nextEditor) return;
+    editor = nextEditor;
+    paper = nextEditor.closest('.paper') || paper;
+  }
+
+  function splitStoredPages(html) {
+    const parts = String(html || '').split(PAGE_BREAK);
+    return parts.length ? parts : [''];
+  }
+
+  function serializeActivePages() {
+    return getPageEditors().map(pageEditor => pageEditor.innerHTML).join(PAGE_BREAK);
+  }
+
+  function createPage(html = '', { focus = false } = {}) {
+    const page = document.createElement('article');
+    page.className = `paper ${currentDirection === 'vertical' ? 'vertical' : 'horizontal'}${currentLatinOrientation === 'upright' ? ' latin-upright' : ''}`;
+    page.setAttribute('aria-label', '文書編集領域');
+    const pageEditor = document.createElement('div');
+    pageEditor.className = 'editor';
+    pageEditor.contentEditable = 'true';
+    pageEditor.spellcheck = false;
+    pageEditor.dataset.placeholder = 'ここに文章を入力';
+    pageEditor.innerHTML = html || '';
+    page.appendChild(pageEditor);
+    pagesContainer.appendChild(page);
+    bindPageEditor(pageEditor);
+    applyPaperDimensionsTo(page);
+    if (focus) {
+      setActiveEditor(pageEditor);
+      pageEditor.focus();
+    }
+    return pageEditor;
+  }
+
+  function loadActiveTabPages(html = '') {
+    const parts = splitStoredPages(html);
+    pagesContainer.innerHTML = '';
+    parts.forEach(part => createPage(part));
+    if (!getPageEditors().length) createPage('');
+    const firstEditor = getPageEditors()[0];
+    const firstPaper = getPagePapers()[0];
+    firstEditor.id = 'editor';
+    firstPaper.id = 'paper';
+    setActiveEditor(firstEditor);
+    applyDirection();
+    applyPaperSettings({ save: false, repaginate: false });
+    requestAnimationFrame(() => paginateAllPages({ preserveCaret: false }));
+  }
+
+  function applyPaperDimensionsTo(page) {
+    if (!page) return;
+    const { width, height } = getPaperDimensions();
+    page.style.width = `${width}mm`;
+    page.style.minWidth = `${width}mm`;
+    page.style.height = `${height}mm`;
+    page.dataset.size = currentPaperSize;
+    page.dataset.orientation = currentPaperOrientation;
+    const zoom = Number($('zoomSelect')?.value || 1);
+    page.style.transform = `scale(${zoom})`;
+  }
+
+  function pageOverflows(pageEditor) {
+    if (!pageEditor) return false;
+    if (currentDirection === 'vertical') return pageEditor.scrollWidth > pageEditor.clientWidth + 2;
+    return pageEditor.scrollHeight > pageEditor.clientHeight + 2;
+  }
+
+  function getLastTextNode(root) {
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    let node = null;
+    let current;
+    while ((current = walker.nextNode())) {
+      if (current.nodeValue && current.nodeValue.length) node = current;
+    }
+    return node;
+  }
+
+  function cloneAncestorChain(textNode, fragment, stopNode) {
+    let wrapped = fragment;
+    let parent = textNode.parentNode;
+    while (parent && parent !== stopNode) {
+      const clone = parent.cloneNode(false);
+      clone.appendChild(wrapped);
+      wrapped = clone;
+      parent = parent.parentNode;
+    }
+    return wrapped;
+  }
+
+  function prependNode(target, node) {
+    if (!target.firstChild) target.appendChild(node);
+    else target.insertBefore(node, target.firstChild);
+  }
+
+  function ensureNextPage(sourceEditor) {
+    const sourcePaper = sourceEditor.closest('.paper');
+    let nextPaper = sourcePaper?.nextElementSibling;
+    if (!nextPaper || !nextPaper.classList.contains('paper')) {
+      const page = document.createElement('article');
+      page.className = `paper ${currentDirection === 'vertical' ? 'vertical' : 'horizontal'}${currentLatinOrientation === 'upright' ? ' latin-upright' : ''}`;
+      page.setAttribute('aria-label', '文書編集領域');
+      const nextEditor = document.createElement('div');
+      nextEditor.className = 'editor';
+      nextEditor.contentEditable = 'true';
+      nextEditor.spellcheck = false;
+      nextEditor.dataset.placeholder = 'ここに文章を入力';
+      page.appendChild(nextEditor);
+      sourcePaper.insertAdjacentElement('afterend', page);
+      bindPageEditor(nextEditor);
+      applyPaperDimensionsTo(page);
+      return nextEditor;
+    }
+    return nextPaper.querySelector('.editor');
+  }
+
+  function moveTrailingContent(sourceEditor, targetEditor) {
+    const last = sourceEditor.lastChild;
+    if (!last) return false;
+
+    if (sourceEditor.childNodes.length > 1) {
+      sourceEditor.removeChild(last);
+      prependNode(targetEditor, last);
+      return true;
+    }
+
+    const textNode = getLastTextNode(sourceEditor);
+    if (!textNode || !textNode.nodeValue) {
+      sourceEditor.removeChild(last);
+      prependNode(targetEditor, last);
+      return true;
+    }
+
+    const len = textNode.nodeValue.length;
+    const chunk = Math.max(1, Math.ceil(len / 10));
+    const range = document.createRange();
+    range.setStart(textNode, Math.max(0, len - chunk));
+    range.setEnd(textNode, len);
+    const fragment = range.extractContents();
+    const wrapped = cloneAncestorChain(textNode, fragment, sourceEditor);
+    prependNode(targetEditor, wrapped);
+    return true;
+  }
+
+  function getGlobalCaretOffset() {
+    const sel = window.getSelection();
+    if (!sel || !sel.rangeCount) return null;
+    const range = sel.getRangeAt(0);
+    const editors = getPageEditors();
+    let total = 0;
+    for (const pageEditor of editors) {
+      if (pageEditor.contains(range.startContainer)) {
+        const r = document.createRange();
+        r.selectNodeContents(pageEditor);
+        r.setEnd(range.startContainer, range.startOffset);
+        return total + r.toString().length;
+      }
+      total += pageEditor.innerText.length;
+    }
+    return null;
+  }
+
+  function restoreGlobalCaretOffset(offset) {
+    if (offset == null) return;
+    let remaining = offset;
+    const editors = getPageEditors();
+    for (const pageEditor of editors) {
+      const walker = document.createTreeWalker(pageEditor, NodeFilter.SHOW_TEXT);
+      let node;
+      while ((node = walker.nextNode())) {
+        const len = node.nodeValue.length;
+        if (remaining <= len) {
+          const range = document.createRange();
+          range.setStart(node, Math.max(0, remaining));
+          range.collapse(true);
+          const sel = window.getSelection();
+          sel.removeAllRanges();
+          sel.addRange(range);
+          setActiveEditor(pageEditor);
+          pageEditor.focus({ preventScroll: true });
+          savedEditorRange = range.cloneRange();
+          return;
+        }
+        remaining -= len;
+      }
+    }
+    const lastEditor = editors[editors.length - 1];
+    if (lastEditor) {
+      const range = document.createRange();
+      range.selectNodeContents(lastEditor);
+      range.collapse(false);
+      const sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(range);
+      setActiveEditor(lastEditor);
+      lastEditor.focus({ preventScroll: true });
+      savedEditorRange = range.cloneRange();
+    }
+  }
+
+  function removeTrailingEmptyPages() {
+    const editors = getPageEditors();
+    for (let i = editors.length - 1; i > 0; i--) {
+      if ((editors[i].innerText || '').trim() || editors[i].querySelector('img,hr,table')) break;
+      editors[i].closest('.paper')?.remove();
+    }
+  }
+
+  function paginateAllPages({ preserveCaret = true } = {}) {
+    if (isPaginating) return;
+    isPaginating = true;
+    const caretOffset = preserveCaret ? getGlobalCaretOffset() : null;
+    try {
+      const editors = getPageEditors();
+      for (let i = 0; i < editors.length; i++) {
+        const sourceEditor = editors[i];
+        let guard = 0;
+        while (pageOverflows(sourceEditor) && guard++ < 1000) {
+          const nextEditor = ensureNextPage(sourceEditor);
+          if (!moveTrailingContent(sourceEditor, nextEditor)) break;
+          if (!editors.includes(nextEditor)) editors.splice(i + 1, 0, nextEditor);
+        }
+      }
+      removeTrailingEmptyPages();
+    } finally {
+      isPaginating = false;
+    }
+    if (preserveCaret) restoreGlobalCaretOffset(caretOffset);
+  }
+
+  function repaginateActiveTab() {
+    const combined = getPageEditors().map(e => e.innerHTML).join('');
+    pagesContainer.innerHTML = '';
+    const first = createPage(combined);
+    first.id = 'editor';
+    first.closest('.paper').id = 'paper';
+    setActiveEditor(first);
+    applyDirection();
+    applyPaperSettings({ save: false, repaginate: false });
+    requestAnimationFrame(() => {
+      paginateAllPages({ preserveCaret: false });
+      syncActiveTab();
+      updateCount();
+      scheduleSave();
+    });
+  }
+
+  function bindPageEditor(pageEditor) {
+    if (!pageEditor || pageEditor.dataset.bound === 'true') return;
+    pageEditor.dataset.bound = 'true';
+    pageEditor.addEventListener('focus', () => setActiveEditor(pageEditor));
+    pageEditor.addEventListener('pointerdown', () => setActiveEditor(pageEditor));
+    pageEditor.addEventListener('input', () => {
+      setActiveEditor(pageEditor);
+      const size = Number($('fontSizeInput').value || 12);
+      normalizeCustomFontSizes(size);
+      rememberEditorSelection();
+      paginateAllPages();
+      syncActiveTab();
+      scheduleSave();
+      updateCount();
+    });
+    pageEditor.addEventListener('keyup', () => { setActiveEditor(pageEditor); rememberEditorSelection(); });
+    pageEditor.addEventListener('mouseup', () => { setActiveEditor(pageEditor); rememberEditorSelection(); });
+  }
+
   function cmd(name, value = null) {
     editor.focus();
     document.execCommand('styleWithCSS', false, true);
     document.execCommand(name, false, value);
+    requestAnimationFrame(() => paginateAllPages());
     syncActiveTab();
     scheduleSave();
     updateCount();
@@ -131,6 +411,7 @@
     document.execCommand('styleWithCSS', false, true);
     normalizeCustomFontSizes(size);
     rememberEditorSelection();
+    requestAnimationFrame(() => paginateAllPages());
     syncActiveTab();
     scheduleSave();
   }
@@ -143,7 +424,17 @@
   }
 
   function insertPageBreak() {
-    cmd('insertHTML', '<div style="break-before:page;page-break-before:always;"><br></div>');
+    const nextEditor = ensureNextPage(editor);
+    setActiveEditor(nextEditor);
+    const range = document.createRange();
+    range.selectNodeContents(nextEditor);
+    range.collapse(true);
+    const sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+    nextEditor.focus();
+    syncActiveTab();
+    scheduleSave();
   }
 
   function getPaperDimensions() {
@@ -155,13 +446,9 @@
     };
   }
 
-  function applyPaperSettings({ save = true } = {}) {
+  function applyPaperSettings({ save = true, repaginate = true } = {}) {
     const { width, height } = getPaperDimensions();
-    paper.style.width = `${width}mm`;
-    paper.style.minWidth = `${width}mm`;
-    paper.style.height = `${height}mm`;
-    paper.dataset.size = currentPaperSize;
-    paper.dataset.orientation = currentPaperOrientation;
+    getPagePapers().forEach(applyPaperDimensionsTo);
 
     $('paperSizeSelect').value = currentPaperSize;
     $('paperOrientationSelect').value = currentPaperOrientation;
@@ -169,10 +456,16 @@
     const orientationLabel = currentPaperOrientation === 'landscape' ? '横長' : '縦長';
     paperState.textContent = `${label} / ${orientationLabel}`;
 
+    document.documentElement.style.setProperty('--margin-top', `${currentMargins.top}mm`);
+    document.documentElement.style.setProperty('--margin-bottom', `${currentMargins.bottom}mm`);
+    document.documentElement.style.setProperty('--margin-left', `${currentMargins.left}mm`);
+    document.documentElement.style.setProperty('--margin-right', `${currentMargins.right}mm`);
+
     const cssPxPerMm = 96 / 25.4;
     document.documentElement.style.setProperty('--ruler-width', `${Math.round(width * cssPxPerMm)}px`);
     updateZoomSpacing();
     updatePrintStyle();
+    if (repaginate) requestAnimationFrame(repaginateActiveTab);
     if (save) scheduleSave();
   }
 
@@ -192,7 +485,7 @@
 
   function setZoom(value) {
     $('zoomSelect').value = String(value);
-    paper.style.transform = `scale(${value})`;
+    getPagePapers().forEach(pageEl => { pageEl.style.transform = `scale(${value})`; });
     updateZoomSpacing();
     scheduleSave();
   }
@@ -202,13 +495,15 @@
     const { height } = getPaperDimensions();
     const cssPxPerMm = 96 / 25.4;
     const paperHeightPx = height * cssPxPerMm;
-    const marginBottom = Math.max(0, (value - 1) * paperHeightPx);
+    const pageCount = Math.max(1, getPagePapers().length);
+    const marginBottom = Math.max(0, (value - 1) * paperHeightPx * pageCount);
     $('paperStage').style.paddingBottom = `${60 + marginBottom}px`;
   }
 
   function toggleDirection() {
     currentDirection = currentDirection === 'vertical' ? 'horizontal' : 'vertical';
     applyDirection();
+    repaginateActiveTab();
     scheduleSave();
     editor.focus();
   }
@@ -276,9 +571,11 @@
   }
 
   function applyDirection() {
-    paper.classList.toggle('vertical', currentDirection === 'vertical');
-    paper.classList.toggle('horizontal', currentDirection === 'horizontal');
-    paper.classList.toggle('latin-upright', currentLatinOrientation === 'upright');
+    getPagePapers().forEach(pageEl => {
+      pageEl.classList.toggle('vertical', currentDirection === 'vertical');
+      pageEl.classList.toggle('horizontal', currentDirection === 'horizontal');
+      pageEl.classList.toggle('latin-upright', currentLatinOrientation === 'upright');
+    });
     directionBtn.textContent = currentDirection === 'vertical' ? '縦書き' : '横書き';
     directionBtn.setAttribute('aria-pressed', currentDirection === 'vertical' ? 'true' : 'false');
     latinOrientationBtn.textContent = currentLatinOrientation === 'upright' ? '英字：縦' : '英字：横';
@@ -298,7 +595,7 @@
   }
 
   function countChars() {
-    return countText(editor.innerText || '');
+    return countText(getPageEditors().map(pageEditor => pageEditor.innerText || '').join(''));
   }
 
   function updateCount() {
@@ -314,7 +611,7 @@
 
   function syncActiveTab() {
     const tab = tabs.find(t => t.id === activeTabId);
-    if (tab) tab.html = editor.innerHTML;
+    if (tab) tab.html = serializeActivePages();
   }
 
   function renderTabs() {
@@ -324,7 +621,7 @@
       btn.type = 'button';
       btn.className = `doc-tab${tab.id === activeTabId ? ' active' : ''}`;
       btn.title = tab.name || `タブ${index + 1}`;
-      const html = tab.id === activeTabId ? editor.innerHTML : tab.html;
+      const html = tab.id === activeTabId ? serializeActivePages() : tab.html;
       const count = countHtml(html);
       btn.innerHTML = `<span class="tab-label">${escapeHtml(tab.name || `タブ${index + 1}`)}</span><span class="tab-count">${count.toLocaleString('ja-JP')}字</span>`;
       btn.title = `${tab.name || `タブ${index + 1}`}（ダブルクリックで名前変更）`;
@@ -343,7 +640,7 @@
     const target = tabs.find(t => t.id === id);
     if (!target) return;
     activeTabId = id;
-    editor.innerHTML = target.html || '';
+    loadActiveTabPages(target.html || '');
     lastFindIndex = -1;
     updateCount();
     scheduleSave();
@@ -355,7 +652,7 @@
     const tab = createTab(`タブ${tabs.length + 1}`);
     tabs.push(tab);
     activeTabId = tab.id;
-    editor.innerHTML = '';
+    loadActiveTabPages('');
     updateCount();
     scheduleSave();
     editor.focus();
@@ -390,6 +687,7 @@
       zoom: Number($('zoomSelect').value),
       paperSize: currentPaperSize,
       paperOrientation: currentPaperOrientation,
+      margins: currentMargins,
       updatedAt: new Date().toISOString()
     };
     localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
@@ -411,8 +709,10 @@
         const first = createTab('タブ1');
         tabs = [first];
         activeTabId = first.id;
+        currentMargins = { top: 18, bottom: 18, left: 18, right: 18 };
+        loadActiveTabPages('');
         applyDirection();
-        applyPaperSettings({ save: false });
+        applyPaperSettings({ save: false, repaginate: false });
         setZoom(1);
         renderTabs();
         return;
@@ -431,14 +731,21 @@
         tabs = [first];
         activeTabId = first.id;
       }
-      const active = tabs.find(t => t.id === activeTabId) || tabs[0];
-      editor.innerHTML = active.html || '';
       currentDirection = data.direction === 'horizontal' ? 'horizontal' : 'vertical';
       currentLatinOrientation = data.latinOrientation === 'upright' ? 'upright' : 'mixed';
       currentPaperSize = PAPER_SIZES[data.paperSize] ? data.paperSize : 'A4';
       currentPaperOrientation = data.paperOrientation === 'landscape' ? 'landscape' : 'portrait';
+      const m = data.margins || {};
+      currentMargins = {
+        top: Number.isFinite(Number(m.top)) ? Number(m.top) : 18,
+        bottom: Number.isFinite(Number(m.bottom)) ? Number(m.bottom) : 18,
+        left: Number.isFinite(Number(m.left)) ? Number(m.left) : 18,
+        right: Number.isFinite(Number(m.right)) ? Number(m.right) : 18
+      };
+      const active = tabs.find(t => t.id === activeTabId) || tabs[0];
+      loadActiveTabPages(active.html || '');
       applyDirection();
-      applyPaperSettings({ save: false });
+      applyPaperSettings({ save: false, repaginate: false });
       setZoom(data.zoom || 1);
       if (migrated) saveDocument();
       saveState.textContent = '保存済み';
@@ -448,27 +755,29 @@
       const first = createTab('タブ1');
       tabs = [first];
       activeTabId = first.id;
+      currentMargins = { top: 18, bottom: 18, left: 18, right: 18 };
+      loadActiveTabPages('');
       applyDirection();
-      applyPaperSettings({ save: false });
+      applyPaperSettings({ save: false, repaginate: false });
       renderTabs();
     }
   }
 
   function newDocument() {
-    const hasText = tabs.some(tab => countHtml(tab.id === activeTabId ? editor.innerHTML : tab.html) > 0);
+    const hasText = tabs.some(tab => countHtml(tab.id === activeTabId ? serializeActivePages() : tab.html) > 0);
     if (hasText && !confirm('現在の内容を消して新しい文書を作成しますか？')) return;
     title.value = '無題のドキュメント';
     const first = createTab('タブ1');
     tabs = [first];
     activeTabId = first.id;
-    editor.innerHTML = '';
     currentDirection = 'vertical';
     currentLatinOrientation = 'mixed';
     currentPaperSize = 'A4';
     currentPaperOrientation = 'portrait';
-    paper.className = 'paper vertical';
+    currentMargins = { top: 18, bottom: 18, left: 18, right: 18 };
+    loadActiveTabPages('');
     applyDirection();
-    applyPaperSettings({ save: false });
+    applyPaperSettings({ save: false, repaginate: false });
     $('zoomSelect').value = '1';
     setZoom(1);
     localStorage.removeItem(STORAGE_KEY);
@@ -498,18 +807,30 @@
     return tabs.map(tab => ({ ...tab }));
   }
 
+  function allPageSnapshots() {
+    return allTabsSnapshot().flatMap((tab) =>
+      splitStoredPages(tab.html).map((html, pageIndex) => ({
+        tabId: tab.id,
+        tabName: tab.name,
+        pageIndex,
+        html
+      }))
+    );
+  }
+
   function documentHtml() {
     const vertical = currentDirection === 'vertical';
     const orientation = currentLatinOrientation === 'upright' ? 'upright' : 'mixed';
     const { width, height } = getPaperDimensions();
-    const sections = allTabsSnapshot().map((tab, index) => (
-      `<section class="export-tab${index ? ' page-break' : ''}" data-tab="${escapeHtml(tab.name)}">${tab.html || ''}</section>`
+    const pages = allPageSnapshots();
+    const sections = pages.map((pageData, index) => (
+      `<section class="export-tab${index ? ' page-break' : ''}" data-tab="${escapeHtml(pageData.tabName)}" data-page="${pageData.pageIndex + 1}">${pageData.html || ''}</section>`
     )).join('');
     return `<!doctype html><html lang="ja"><head><meta charset="utf-8"><title>${escapeHtml(title.value)}</title><style>
 @page{size:${width}mm ${height}mm;margin:0}
 html,body{margin:0;padding:0;background:#fff}
 body{font-family:'Yu Mincho','Hiragino Mincho ProN',serif;font-size:12pt;line-height:2}
-.export-tab{width:${width}mm;height:${height}mm;padding:18mm;box-sizing:border-box;overflow:hidden;${vertical ? `writing-mode:vertical-rl;text-orientation:${orientation};` : 'writing-mode:horizontal-tb;'}}
+.export-tab{width:${width}mm;height:${height}mm;padding:${currentMargins.top}mm ${currentMargins.right}mm ${currentMargins.bottom}mm ${currentMargins.left}mm;box-sizing:border-box;overflow:hidden;${vertical ? `writing-mode:vertical-rl;text-orientation:${orientation};` : 'writing-mode:horizontal-tb;'}}
 .page-break{break-before:page;page-break-before:always}
 h1{font-size:20pt}h2{font-size:16pt}blockquote{border-inline-start:3px solid #999;padding-inline-start:.8em}
 </style></head><body>${sections}</body></html>`;
@@ -549,17 +870,20 @@ h1{font-size:20pt}h2{font-size:16pt}blockquote{border-inline-start:3px solid #99
   }
 
   function buildSpreadXml(spreadId, pageId, frameId, storyId, pageNumber, widthPt, heightPt) {
-    const margin = mmToPt(18);
-    const bottom = Math.max(margin, heightPt - margin);
-    const right = Math.max(margin, widthPt - margin);
-    return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<idPkg:Spread xmlns:idPkg="http://ns.adobe.com/AdobeInDesign/idml/1.0/packaging"><Spread Self="${spreadId}" FlattenerOverride="Default" ShowMasterItems="true"><Page Self="${pageId}" GeometricBounds="0 0 ${heightPt} ${widthPt}" ItemTransform="1 0 0 1 0 0" Name="${pageNumber}" AppliedMaster="n"><Properties><PageColor type="enumeration">UseMasterColor</PageColor></Properties></Page><TextFrame Self="${frameId}" ParentStory="${storyId}" PreviousTextFrame="n" NextTextFrame="n" ContentType="TextType" ItemLayer="ub0" GeometricBounds="${margin} ${margin} ${bottom} ${right}" ItemTransform="1 0 0 1 0 0"><TextFramePreference TextColumnCount="1" TextColumnGutter="12" TextColumnFixedWidth="0" UseFixedColumnWidth="false" FirstBaselineOffset="AscentOffset" MinimumFirstBaselineOffset="0" VerticalJustification="TopAlign" IgnoreWrap="false"/></TextFrame></Spread></idPkg:Spread>`;
+    const top = mmToPt(currentMargins.top);
+    const bottomMargin = mmToPt(currentMargins.bottom);
+    const left = mmToPt(currentMargins.left);
+    const rightMargin = mmToPt(currentMargins.right);
+    const bottom = Math.max(top, heightPt - bottomMargin);
+    const right = Math.max(left, widthPt - rightMargin);
+    return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<idPkg:Spread xmlns:idPkg="http://ns.adobe.com/AdobeInDesign/idml/1.0/packaging"><Spread Self="${spreadId}" FlattenerOverride="Default" ShowMasterItems="true"><Page Self="${pageId}" GeometricBounds="0 0 ${heightPt} ${widthPt}" ItemTransform="1 0 0 1 0 0" Name="${pageNumber}" AppliedMaster="n"><Properties><PageColor type="enumeration">UseMasterColor</PageColor></Properties></Page><TextFrame Self="${frameId}" ParentStory="${storyId}" PreviousTextFrame="n" NextTextFrame="n" ContentType="TextType" ItemLayer="ub0" GeometricBounds="${top} ${left} ${bottom} ${right}" ItemTransform="1 0 0 1 0 0"><TextFramePreference TextColumnCount="1" TextColumnGutter="12" TextColumnFixedWidth="0" UseFixedColumnWidth="false" FirstBaselineOffset="AscentOffset" MinimumFirstBaselineOffset="0" VerticalJustification="TopAlign" IgnoreWrap="false"/></TextFrame></Spread></idPkg:Spread>`;
   }
 
   function makeIdmlFiles() {
     const { width, height } = getPaperDimensions();
     const widthPt = mmToPt(width);
     const heightPt = mmToPt(height);
-    const snapshots = allTabsSnapshot();
+    const snapshots = allPageSnapshots();
     const storyIds = snapshots.map((_, i) => `uStory${i + 1}`);
     const spreadIds = snapshots.map((_, i) => `uSpread${i + 1}`);
     const designImports = snapshots.map((_, i) => `<idPkg:Spread src="Spreads/Spread_${i + 1}.xml"/><idPkg:Story src="Stories/Story_${i + 1}.xml"/>`).join('');
@@ -581,8 +905,8 @@ h1{font-size:20pt}h2{font-size:16pt}blockquote{border-inline-start:3px solid #99
       { name: 'Resources/Graphic.xml', data: graphic }
     ];
 
-    snapshots.forEach((tab, i) => {
-      files.push({ name: `Stories/Story_${i + 1}.xml`, data: buildStoryXml(storyIds[i], tab.html) });
+    snapshots.forEach((pageData, i) => {
+      files.push({ name: `Stories/Story_${i + 1}.xml`, data: buildStoryXml(storyIds[i], pageData.html) });
       files.push({ name: `Spreads/Spread_${i + 1}.xml`, data: buildSpreadXml(spreadIds[i], `uPage${i + 1}`, `uFrame${i + 1}`, storyIds[i], i + 1, widthPt, heightPt) });
     });
     return files;
@@ -675,15 +999,15 @@ h1{font-size:20pt}h2{font-size:16pt}blockquote{border-inline-start:3px solid #99
   }
 
   function printAllTabs() {
-    const snapshots = allTabsSnapshot();
+    const snapshots = allPageSnapshots();
     const { width, height } = getPaperDimensions();
     const container = document.createElement('div');
     container.id = 'printExportContainer';
     container.style.display = 'none';
-    snapshots.forEach((tab) => {
+    snapshots.forEach((pageData) => {
       const page = document.createElement('section');
       page.className = 'print-export-page';
-      page.innerHTML = tab.html || '';
+      page.innerHTML = pageData.html || '';
       container.appendChild(page);
     });
     document.body.appendChild(container);
@@ -694,7 +1018,7 @@ h1{font-size:20pt}h2{font-size:16pt}blockquote{border-inline-start:3px solid #99
       document.head.appendChild(style);
     }
     const orientation = currentLatinOrientation === 'upright' ? 'upright' : 'mixed';
-    style.textContent = `@page{size:${width}mm ${height}mm;margin:0}@media print{body>*:not(#printExportContainer){display:none!important}#printExportContainer{display:block!important}.print-export-page{width:${width}mm;height:${height}mm;padding:18mm;box-sizing:border-box;overflow:hidden;break-after:page;page-break-after:always;font-family:'Yu Mincho','Hiragino Mincho ProN',serif;font-size:12pt;line-height:2;${currentDirection === 'vertical' ? `writing-mode:vertical-rl;text-orientation:${orientation};` : 'writing-mode:horizontal-tb;'}}.print-export-page:last-child{break-after:auto;page-break-after:auto}}`;
+    style.textContent = `@page{size:${width}mm ${height}mm;margin:0}@media print{body>*:not(#printExportContainer){display:none!important}#printExportContainer{display:block!important}.print-export-page{width:${width}mm;height:${height}mm;padding:${currentMargins.top}mm ${currentMargins.right}mm ${currentMargins.bottom}mm ${currentMargins.left}mm;box-sizing:border-box;overflow:hidden;break-after:page;page-break-after:always;font-family:'Yu Mincho','Hiragino Mincho ProN',serif;font-size:12pt;line-height:2;${currentDirection === 'vertical' ? `writing-mode:vertical-rl;text-orientation:${orientation};` : 'writing-mode:horizontal-tb;'}}.print-export-page:last-child{break-after:auto;page-break-after:auto}}`;
     const cleanup = () => {
       container.remove();
       style.textContent = '';
@@ -702,6 +1026,32 @@ h1{font-size:20pt}h2{font-size:16pt}blockquote{border-inline-start:3px solid #99
     };
     window.addEventListener('afterprint', cleanup);
     setTimeout(() => window.print(), 0);
+  }
+
+
+  function openMarginDialog() {
+    $('marginTopInput').value = String(currentMargins.top);
+    $('marginBottomInput').value = String(currentMargins.bottom);
+    $('marginLeftInput').value = String(currentMargins.left);
+    $('marginRightInput').value = String(currentMargins.right);
+    $('marginDialog').showModal();
+  }
+
+  function applyMarginDialog() {
+    const next = {
+      top: Math.max(0, Math.min(100, Number($('marginTopInput').value) || 0)),
+      bottom: Math.max(0, Math.min(100, Number($('marginBottomInput').value) || 0)),
+      left: Math.max(0, Math.min(100, Number($('marginLeftInput').value) || 0)),
+      right: Math.max(0, Math.min(100, Number($('marginRightInput').value) || 0))
+    };
+    const { width, height } = getPaperDimensions();
+    if (next.top + next.bottom >= height - 10 || next.left + next.right >= width - 10) {
+      alert('余白が大きすぎます。文字を書ける範囲が残るように設定してください。');
+      return;
+    }
+    currentMargins = next;
+    $('marginDialog').close();
+    applyPaperSettings();
   }
 
   function openFind() {
@@ -713,7 +1063,7 @@ h1{font-size:20pt}h2{font-size:16pt}blockquote{border-inline-start:3px solid #99
 
   function findNext() {
     const term = $('findInput').value;
-    const text = editor.innerText || '';
+    const text = getPageEditors().map(e => e.innerText || '').join('');
     if (!term) return;
     lastFindIndex = text.indexOf(term, lastFindIndex + 1);
     if (lastFindIndex < 0) lastFindIndex = text.indexOf(term);
@@ -722,22 +1072,33 @@ h1{font-size:20pt}h2{font-size:16pt}blockquote{border-inline-start:3px solid #99
   }
 
   function selectTextByOffset(start, length) {
-    const walker = document.createTreeWalker(editor, NodeFilter.SHOW_TEXT);
-    let node, offset = 0, startNode = null, endNode = null, startOffset = 0, endOffset = 0;
-    while ((node = walker.nextNode())) {
-      const next = offset + node.nodeValue.length;
-      if (!startNode && start >= offset && start <= next) { startNode = node; startOffset = start - offset; }
-      if (startNode && start + length >= offset && start + length <= next) { endNode = node; endOffset = start + length - offset; break; }
-      offset = next;
-    }
-    if (startNode && endNode) {
-      const range = document.createRange();
-      range.setStart(startNode, startOffset);
-      range.setEnd(endNode, endOffset);
-      const sel = window.getSelection();
-      sel.removeAllRanges();
-      sel.addRange(range);
-      editor.focus();
+    let base = 0;
+    for (const pageEditor of getPageEditors()) {
+      const pageLength = (pageEditor.innerText || '').length;
+      if (start <= base + pageLength) {
+        const localStart = Math.max(0, start - base);
+        const walker = document.createTreeWalker(pageEditor, NodeFilter.SHOW_TEXT);
+        let node, offset = 0, startNode = null, endNode = null, startOffset = 0, endOffset = 0;
+        while ((node = walker.nextNode())) {
+          const next = offset + node.nodeValue.length;
+          if (!startNode && localStart >= offset && localStart <= next) { startNode = node; startOffset = localStart - offset; }
+          if (startNode && localStart + length >= offset && localStart + length <= next) { endNode = node; endOffset = localStart + length - offset; break; }
+          offset = next;
+        }
+        if (startNode && endNode) {
+          const range = document.createRange();
+          range.setStart(startNode, startOffset);
+          range.setEnd(endNode, endOffset);
+          const sel = window.getSelection();
+          sel.removeAllRanges();
+          sel.addRange(range);
+          setActiveEditor(pageEditor);
+          pageEditor.focus();
+          savedEditorRange = range.cloneRange();
+        }
+        return;
+      }
+      base += pageLength;
     }
   }
 
@@ -759,15 +1120,23 @@ h1{font-size:20pt}h2{font-size:16pt}blockquote{border-inline-start:3px solid #99
     const term = $('findInput').value;
     const replacement = $('replaceInput').value;
     if (!term) return;
-    const plain = editor.innerText || '';
-    const count = plain.split(term).length - 1;
+    let count = 0;
+    getPageEditors().forEach((pageEditor) => {
+      const walker = document.createTreeWalker(pageEditor, NodeFilter.SHOW_TEXT);
+      const nodes = [];
+      let n;
+      while ((n = walker.nextNode())) nodes.push(n);
+      nodes.forEach(node => {
+        const matches = node.nodeValue.split(term).length - 1;
+        if (matches) {
+          count += matches;
+          node.nodeValue = node.nodeValue.split(term).join(replacement);
+        }
+      });
+    });
     if (!count) { $('findMessage').textContent = '見つかりませんでした。'; return; }
-    const walker = document.createTreeWalker(editor, NodeFilter.SHOW_TEXT);
-    const nodes = [];
-    let n;
-    while ((n = walker.nextNode())) nodes.push(n);
-    nodes.forEach(node => { node.nodeValue = node.nodeValue.split(term).join(replacement); });
     $('findMessage').textContent = `${count}件置換しました。`;
+    repaginateActiveTab();
     syncActiveTab();
     scheduleSave();
     updateCount();
@@ -809,16 +1178,6 @@ h1{font-size:20pt}h2{font-size:16pt}blockquote{border-inline-start:3px solid #99
   }));
   document.addEventListener('click', (e) => { if (!menuPanel.contains(e.target)) hideMenu(); });
 
-  editor.addEventListener('input', () => {
-    const size = Number($('fontSizeInput').value || 12);
-    normalizeCustomFontSizes(size);
-    rememberEditorSelection();
-    syncActiveTab();
-    scheduleSave();
-    updateCount();
-  });
-  editor.addEventListener('keyup', rememberEditorSelection);
-  editor.addEventListener('mouseup', rememberEditorSelection);
   document.addEventListener('selectionchange', rememberEditorSelection);
   title.addEventListener('input', scheduleSave);
   $('newDoc').addEventListener('click', newDocument);
@@ -837,6 +1196,9 @@ h1{font-size:20pt}h2{font-size:16pt}blockquote{border-inline-start:3px solid #99
   $('zoomSelect').addEventListener('change', (e) => setZoom(Number(e.target.value)));
   $('paperSizeSelect').addEventListener('change', (e) => setPaperSize(e.target.value));
   $('paperOrientationSelect').addEventListener('change', (e) => setPaperOrientation(e.target.value));
+  $('marginBtn').addEventListener('click', openMarginDialog);
+  $('applyMarginBtn').addEventListener('click', applyMarginDialog);
+  $('closeMarginBtn').addEventListener('click', () => $('marginDialog').close());
   $('blockSelect').addEventListener('change', (e) => formatBlock(e.target.value));
   $('fontSelect').addEventListener('change', (e) => cmd('fontName', e.target.value));
   $('fontSizeInput').addEventListener('pointerdown', rememberEditorSelection);
