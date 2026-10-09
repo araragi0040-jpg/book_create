@@ -12,8 +12,8 @@
   const paperState = $('paperState');
   const menuPanel = $('menuPanel');
   const tabsList = $('tabsList');
-  const STORAGE_KEY = 'tategaki-docs-v007';
-  const LEGACY_STORAGE_KEYS = ['tategaki-docs-v006', 'tategaki-docs-v005', 'tategaki-docs-v004', 'tategaki-docs-v003', 'tategaki-docs-v002', 'tategaki-docs-v001'];
+  const STORAGE_KEY = 'tategaki-docs-v008';
+  const LEGACY_STORAGE_KEYS = ['tategaki-docs-v007', 'tategaki-docs-v006', 'tategaki-docs-v005', 'tategaki-docs-v004', 'tategaki-docs-v003', 'tategaki-docs-v002', 'tategaki-docs-v001'];
   const PAGE_BREAK = '<!--TATEGAKI_PAGE_BREAK-->';
   let saveTimer = null;
   let currentDirection = 'vertical';
@@ -23,6 +23,15 @@
   let currentMargins = { top: 18, bottom: 18, left: 18, right: 18 };
   let marginGuidesVisible = true;
   let isPaginating = false;
+  let isComposing = false;
+  let compositionLayoutTimer = null;
+  let paperResettleTimer = null;
+  let layoutFrame = null;
+  const PROJECT_FORMAT = 'tategaki-docs-project';
+  const PROJECT_VERSION = 1;
+  // ページは表示上の単位。編集ホストはページ全体でひとつにする。
+  pagesContainer.removeAttribute('contenteditable');
+  editor.contentEditable = 'true';
   let lastFindIndex = -1;
   let tabs = [];
   let activeTabId = null;
@@ -39,6 +48,8 @@
   const menuDefinitions = {
     file: [
       ['新規', 'Ctrl+Alt+N', newDocument],
+      ['原稿ファイルを開く', 'Ctrl+O', openProjectFile],
+      ['原稿ファイルを保存', 'Ctrl+S', saveProjectFile],
       ['sep'],
       ['PDFで書き出し', '', exportPdf],
       ['HTMLで書き出し', '', exportHtml],
@@ -138,6 +149,8 @@
   }
 
   function loadActiveTabPages(html = '') {
+    if (layoutFrame !== null) { cancelAnimationFrame(layoutFrame); layoutFrame = null; }
+    savedEditorRange = null;
     const parts = splitStoredPages(html);
     pagesContainer.innerHTML = '';
     parts.forEach(part => createPage(part));
@@ -197,10 +210,14 @@
     else target.insertBefore(node, target.firstChild);
   }
 
+  function hasManualPageStart(pageEditor) {
+    return !!pageEditor?.querySelector(':scope > [data-tategaki-manual-page-start]');
+  }
+
   function ensureNextPage(sourceEditor) {
     const sourcePaper = sourceEditor.closest('.paper');
     let nextPaper = sourcePaper?.nextElementSibling;
-    if (!nextPaper || !nextPaper.classList.contains('paper')) {
+    if (!nextPaper || !nextPaper.classList.contains('paper') || hasManualPageStart(nextPaper.querySelector('.editor'))) {
       const page = document.createElement('article');
       page.className = `paper ${currentDirection === 'vertical' ? 'vertical' : 'horizontal'}${currentLatinOrientation === 'upright' ? ' latin-upright' : ''}`;
       page.setAttribute('aria-label', '文書編集領域');
@@ -222,7 +239,17 @@
     const last = sourceEditor.lastChild;
     if (!last) return false;
 
-    if (sourceEditor.childNodes.length > 1) {
+    // カーソル／選択マーカーは実際の本文ではない。マーカー以外の
+    // 本文ノードが1つしかないときは、丸ごと次ページへ動かさず分割する。
+    const meaningful = [...sourceEditor.childNodes].filter(node =>
+      !(node.nodeType === Node.ELEMENT_NODE && node.hasAttribute('data-tategaki-caret-marker'))
+    );
+    if (meaningful.length > 1 || (meaningful.length === 1 && meaningful[0].nodeType !== Node.TEXT_NODE && meaningful[0] !== last)) {
+      sourceEditor.removeChild(last);
+      prependNode(targetEditor, last);
+      return true;
+    }
+    if (last.nodeType === Node.ELEMENT_NODE && last.hasAttribute('data-tategaki-caret-marker')) {
       sourceEditor.removeChild(last);
       prependNode(targetEditor, last);
       return true;
@@ -302,37 +329,57 @@
     }
   }
 
-  function createCaretMarker() {
+  // DOMノードをページ間移動しても、範囲選択／カーソルを正しい位置へ戻す。
+  function createSelectionBookmark() {
     const sel = window.getSelection();
     if (!sel || !sel.rangeCount) return null;
-    const range = sel.getRangeAt(0);
-    if (!range.collapsed) return null;
-    const host = getPageEditors().find(pageEditor => pageEditor.contains(range.startContainer));
-    if (!host) return null;
+    const range = sel.getRangeAt(0).cloneRange();
+    const editors = getPageEditors();
+    const hasStart = editors.some(el => el.contains(range.startContainer));
+    const hasEnd = editors.some(el => el.contains(range.endContainer));
+    if (!hasStart || !hasEnd) return null;
 
-    const marker = document.createElement('span');
-    marker.dataset.tategakiCaretMarker = 'true';
-    marker.setAttribute('aria-hidden', 'true');
-    marker.style.cssText = 'display:inline-block;width:0;height:0;overflow:hidden;line-height:0;font-size:0;padding:0;margin:0;border:0;';
-    const markerRange = range.cloneRange();
-    markerRange.insertNode(marker);
-    return marker;
+    const makeMarker = (kind) => {
+      const marker = document.createElement('span');
+      marker.dataset.tategakiCaretMarker = kind;
+      marker.setAttribute('aria-hidden', 'true');
+      marker.style.cssText = 'display:inline-block;width:0;height:0;overflow:hidden;line-height:0;font-size:0;padding:0;margin:0;border:0;';
+      return marker;
+    };
+    const endMarker = makeMarker('end');
+    const endRange = range.cloneRange();
+    endRange.collapse(false);
+    endRange.insertNode(endMarker);
+    if (range.collapsed) return { start: endMarker, end: endMarker, collapsed: true };
+    const startMarker = makeMarker('start');
+    const startRange = range.cloneRange();
+    startRange.collapse(true);
+    startRange.insertNode(startMarker);
+    return { start: startMarker, end: endMarker, collapsed: false };
   }
 
-  function restoreCaretFromMarker(marker) {
-    if (!marker || !marker.isConnected) return false;
-    const host = marker.closest('.editor');
-    if (!host) { marker.remove(); return false; }
-
+  function restoreSelectionBookmark(bookmark) {
+    if (!bookmark) return false;
+    const { start, end } = bookmark;
+    if (!start.isConnected || !end.isConnected) {
+      start.remove();
+      if (end !== start) end.remove();
+      return false;
+    }
     const range = document.createRange();
-    range.setStartAfter(marker);
-    range.collapse(true);
-    marker.remove();
+    range.setStartAfter(start);
+    if (bookmark.collapsed) range.collapse(true);
+    else range.setEndBefore(end);
+    const host = start.closest('.editor') || end.closest('.editor');
+    start.remove();
+    if (end !== start) end.remove();
     const sel = window.getSelection();
     sel.removeAllRanges();
     sel.addRange(range);
-    setActiveEditor(host);
-    host.focus({ preventScroll: true });
+    if (host) {
+      setActiveEditor(host);
+      host.focus({ preventScroll: true });
+    }
     savedEditorRange = range.cloneRange();
     return true;
   }
@@ -349,88 +396,232 @@
   }
 
   function paginateAllPages({ preserveCaret = true } = {}) {
-    if (isPaginating) return;
+    if (isPaginating || isComposing) return;
     isPaginating = true;
-    const caretMarker = preserveCaret ? createCaretMarker() : null;
-    const caretOffset = preserveCaret && !caretMarker ? getGlobalCaretOffset() : null;
+    const bookmark = preserveCaret ? createSelectionBookmark() : null;
+    const caretOffset = preserveCaret && !bookmark ? getGlobalCaretOffset() : null;
     try {
+      // いったん全ページの子ノードを先頭ページへ集める。
+      // これにより文章削除後も後ろのページから自然に詰め戻される。
+      const all = getPageEditors();
+      if (!all.length) return;
+      const first = all[0];
+      // Ctrl+Enterの手動区切りだけはセクション境界として保護し、
+      // その前後の自動ページを各セクション内で詰め直す。
+      let groupFirst = first;
+      for (let i = 1; i < all.length; i++) {
+        if (hasManualPageStart(all[i])) {
+          groupFirst.normalize();
+          groupFirst = all[i];
+        } else {
+          while (all[i].firstChild) groupFirst.appendChild(all[i].firstChild);
+          all[i].closest('.paper')?.remove();
+        }
+      }
+      groupFirst.normalize();
+      first.id = 'editor';
+      const firstPaper = first.closest('.paper');
+      if (firstPaper) firstPaper.id = 'paper';
+
       const editors = getPageEditors();
-      for (let i = 0; i < editors.length; i++) {
+      for (let i = 0; i < editors.length && i < 1000; i++) {
         const sourceEditor = editors[i];
         let guard = 0;
-        while (pageOverflows(sourceEditor) && guard++ < 1000) {
+        while (pageOverflows(sourceEditor) && guard++ < 10000) {
           const nextEditor = ensureNextPage(sourceEditor);
           if (!moveTrailingContent(sourceEditor, nextEditor)) break;
           if (!editors.includes(nextEditor)) editors.splice(i + 1, 0, nextEditor);
         }
       }
       removeTrailingEmptyPages();
+      updateZoomSpacing();
     } finally {
       isPaginating = false;
     }
     if (preserveCaret) {
-      if (!restoreCaretFromMarker(caretMarker)) restoreGlobalCaretOffset(caretOffset);
+      if (!restoreSelectionBookmark(bookmark)) restoreGlobalCaretOffset(caretOffset);
     }
   }
 
-  function repaginateActiveTab() {
-    const combined = getPageEditors().map(e => e.innerHTML).join('');
-    pagesContainer.innerHTML = '';
-    const first = createPage(combined);
-    first.id = 'editor';
-    first.closest('.paper').id = 'paper';
-    setActiveEditor(first);
-    applyDirection();
-    applyPaperSettings({ save: false, repaginate: false });
-    requestAnimationFrame(() => {
-      paginateAllPages({ preserveCaret: false });
-      syncActiveTab();
-      updateCount();
-      scheduleSave();
-    });
-  }
-
-  function bindPageEditor(pageEditor) {
-    if (!pageEditor || pageEditor.dataset.bound === 'true') return;
-    pageEditor.dataset.bound = 'true';
-    pageEditor.addEventListener('focus', () => setActiveEditor(pageEditor));
-    pageEditor.addEventListener('pointerdown', () => setActiveEditor(pageEditor));
-    pageEditor.addEventListener('keydown', (e) => {
-      const mod = e.ctrlKey || e.metaKey;
-      if (e.key !== 'Enter' || mod || e.altKey) return;
-
-      // Enterは常に本文の改行として扱う。保存は従来どおり自動保存で行う。
-      e.preventDefault();
-      setActiveEditor(pageEditor);
-      pageEditor.focus();
-      document.execCommand('insertLineBreak', false, null);
-      rememberEditorSelection();
-      requestAnimationFrame(() => {
-        paginateAllPages();
-        syncActiveTab();
-        scheduleSave();
-        updateCount();
-      });
-    });
-    pageEditor.addEventListener('input', () => {
-      setActiveEditor(pageEditor);
-      const size = Number($('fontSizeInput').value || 12);
-      normalizeCustomFontSizes(size);
-      rememberEditorSelection();
+  function queuePagination() {
+    if (isComposing || layoutFrame !== null) return;
+    layoutFrame = requestAnimationFrame(() => {
+      layoutFrame = null;
+      if (isComposing) return;
       paginateAllPages();
       syncActiveTab();
       scheduleSave();
       updateCount();
     });
-    pageEditor.addEventListener('keyup', () => { setActiveEditor(pageEditor); rememberEditorSelection(); });
-    pageEditor.addEventListener('mouseup', () => { setActiveEditor(pageEditor); rememberEditorSelection(); });
   }
+
+  function repaginateActiveTab() {
+    queuePagination();
+  }
+
+  function afterEdit(pageEditor) {
+    if (pageEditor?.isConnected) setActiveEditor(pageEditor);
+    if (isComposing) return;
+    const size = Number($('fontSizeInput').value || 12);
+    normalizeCustomFontSizes(size);
+    rememberEditorSelection();
+    queuePagination();
+    scheduleSave();
+    updateCount();
+  }
+
+  function bindPageEditor(pageEditor) {
+    if (!pageEditor || pageEditor.dataset.bound === 'true') return;
+    pageEditor.dataset.bound = 'true';
+    pageEditor.addEventListener('focusin', () => setActiveEditor(pageEditor));
+    pageEditor.addEventListener('pointerdown', () => setActiveEditor(pageEditor));
+    pageEditor.addEventListener('compositionstart', () => {
+      isComposing = true;
+      clearTimeout(compositionLayoutTimer);
+      if (layoutFrame !== null) { cancelAnimationFrame(layoutFrame); layoutFrame = null; }
+      setActiveEditor(pageEditor);
+    });
+    pageEditor.addEventListener('compositionend', () => {
+      isComposing = false;
+      // compositionend 後に最後の input が届くブラウザもあるため、その後で整形する。
+      clearTimeout(compositionLayoutTimer);
+      compositionLayoutTimer = setTimeout(() => afterEdit(pageEditor), 30);
+    });
+    pageEditor.addEventListener('keydown', (e) => {
+      if (e.isComposing || isComposing || e.keyCode === 229 || e.key === 'Process') return;
+      const mod = e.ctrlKey || e.metaKey;
+      if (e.key === 'Enter' && !mod && !e.altKey) {
+        e.preventDefault();
+        setActiveEditor(pageEditor);
+        pageEditor.focus();
+        document.execCommand('insertLineBreak', false, null);
+        rememberEditorSelection();
+        queuePagination();
+        scheduleSave();
+        updateCount();
+        return;
+      }
+      // 用紙をまたぐ矢印の移動を補正。Shift選択は連続した編集ホストで維持する。
+      if (!mod && !e.altKey && !e.shiftKey && /^Arrow(Left|Right|Up|Down)$/.test(e.key)) {
+        moveCursorAcrossPage(e, pageEditor);
+      }
+    });
+    pageEditor.addEventListener('beforeinput', handleCrossPageBeforeInput);
+    pageEditor.addEventListener('input', () => afterEdit(pageEditor));
+    pageEditor.addEventListener('keyup', () => { if (!isComposing) { setActiveEditor(pageEditor); rememberEditorSelection(); } });
+    pageEditor.addEventListener('mouseup', () => { if (!isComposing) { setActiveEditor(pageEditor); rememberEditorSelection(); } });
+  }
+
+  function activeSelectionRange() {
+    const sel = window.getSelection();
+    return sel?.rangeCount ? sel.getRangeAt(0) : null;
+  }
+
+  function pageForNode(node) {
+    const element = node?.nodeType === Node.ELEMENT_NODE ? node : node?.parentElement;
+    return element?.closest?.('.editor') || null;
+  }
+
+  function atPageBoundary(pageEditor, where, range = activeSelectionRange()) {
+    if (!pageEditor || !range || !range.collapsed || !pageEditor.contains(range.startContainer)) return false;
+    const edge = document.createRange();
+    edge.selectNodeContents(pageEditor);
+    edge.collapse(where === 'start');
+    return range.compareBoundaryPoints(Range.START_TO_START, edge) === 0;
+  }
+
+  function setCaretAtPageEdge(pageEditor, where) {
+    const range = document.createRange();
+    range.selectNodeContents(pageEditor);
+    range.collapse(where === 'start');
+    const sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+    setActiveEditor(pageEditor);
+    pageEditor.focus({ preventScroll: true });
+    savedEditorRange = range.cloneRange();
+  }
+
+  function moveCursorAcrossPage(e, pageEditor) {
+    const pages = getPageEditors();
+    const index = pages.indexOf(pageEditor);
+    if (index < 0) return;
+    const previousKeys = currentDirection === 'vertical' ? ['ArrowUp', 'ArrowRight'] : ['ArrowLeft', 'ArrowUp'];
+    const followingKeys = currentDirection === 'vertical' ? ['ArrowDown', 'ArrowLeft'] : ['ArrowRight', 'ArrowDown'];
+    if (index > 0 && previousKeys.includes(e.key) && atPageBoundary(pageEditor, 'start')) {
+      e.preventDefault();
+      setCaretAtPageEdge(pages[index - 1], 'end');
+    } else if (index < pages.length - 1 && followingKeys.includes(e.key) && atPageBoundary(pageEditor, 'end')) {
+      e.preventDefault();
+      setCaretAtPageEdge(pages[index + 1], 'start');
+    }
+  }
+
+  function handleCrossPageBeforeInput(e) {
+    if (isComposing || e.isComposing) return;
+    const range = activeSelectionRange();
+    if (!range) return;
+    const editors = getPageEditors();
+    const startEditor = pageForNode(range.startContainer);
+    const endEditor = pageForNode(range.endContainer);
+    if (!startEditor || !endEditor) return;
+    const startIndex = editors.indexOf(startEditor);
+    const endIndex = editors.indexOf(endEditor);
+    if (startIndex < 0 || endIndex < 0) return;
+    const t = e.inputType || '';
+
+    if (range.collapsed && t === 'deleteContentBackward' && startIndex > 0 && atPageBoundary(startEditor, 'start', range)) {
+      e.preventDefault();
+      setCaretAtPageEdge(editors[startIndex - 1], 'end');
+      document.execCommand('delete', false);
+      queuePagination();
+      return;
+    }
+    if (range.collapsed && t === 'deleteContentForward' && startIndex < editors.length - 1 && atPageBoundary(startEditor, 'end', range)) {
+      e.preventDefault();
+      setCaretAtPageEdge(editors[startIndex + 1], 'start');
+      document.execCommand('forwardDelete', false);
+      queuePagination();
+      return;
+    }
+    if (range.collapsed || startIndex === endIndex) return;
+    if (!t.startsWith('delete') && !t.startsWith('insert')) return;
+
+    // native beforeinput は選択にまたがる article を削除してしまうため、
+    // 最初／最後の編集欄の中身だけ切り取り、中間の用紙枠は残す。
+    e.preventDefault();
+    const left = document.createRange();
+    left.setStart(range.startContainer, range.startOffset);
+    left.setEnd(startEditor, startEditor.childNodes.length);
+    left.deleteContents();
+    const right = document.createRange();
+    right.setStart(endEditor, 0);
+    right.setEnd(range.endContainer, range.endOffset);
+    right.deleteContents();
+    for (let i = startIndex + 1; i < endIndex; i++) editors[i].replaceChildren();
+    setCaretAtPageEdge(startEditor, 'end');
+    if (t.startsWith('insert') && typeof e.data === 'string' && e.data) {
+      document.execCommand('insertText', false, e.data);
+    }
+    queuePagination();
+    scheduleSave();
+    updateCount();
+  }
+
+  // 各ページの beforeinput で境界を処理する。
+  pagesContainer.addEventListener('paste', (e) => {
+    const range = activeSelectionRange();
+    if (!range || range.collapsed || pageForNode(range.startContainer) === pageForNode(range.endContainer)) return;
+    e.preventDefault();
+    // 複数ページにまたがる貼り付けはまず安全なプレーンテキストとして置換。
+    handleCrossPageBeforeInput({ inputType: 'insertText', data: e.clipboardData?.getData('text/plain') || '', preventDefault() {} });
+  });
 
   function cmd(name, value = null) {
     editor.focus();
     document.execCommand('styleWithCSS', false, true);
     document.execCommand(name, false, value);
-    requestAnimationFrame(() => paginateAllPages());
+    queuePagination();
     syncActiveTab();
     scheduleSave();
     updateCount();
@@ -470,7 +661,7 @@
     document.execCommand('styleWithCSS', false, true);
     normalizeCustomFontSizes(size);
     rememberEditorSelection();
-    requestAnimationFrame(() => paginateAllPages());
+    queuePagination();
     syncActiveTab();
     scheduleSave();
   }
@@ -484,6 +675,14 @@
 
   function insertPageBreak() {
     const nextEditor = ensureNextPage(editor);
+    if (!hasManualPageStart(nextEditor)) {
+      const marker = document.createElement('span');
+      marker.dataset.tategakiManualPageStart = 'true';
+      marker.setAttribute('contenteditable', 'false');
+      marker.setAttribute('aria-hidden', 'true');
+      marker.style.display = 'none';
+      nextEditor.prepend(marker);
+    }
     setActiveEditor(nextEditor);
     const range = document.createRange();
     range.selectNodeContents(nextEditor);
@@ -524,7 +723,12 @@
     document.documentElement.style.setProperty('--ruler-width', `${Math.round(width * cssPxPerMm)}px`);
     updateZoomSpacing();
     updatePrintStyle();
-    if (repaginate) requestAnimationFrame(repaginateActiveTab);
+    if (repaginate) {
+      requestAnimationFrame(repaginateActiveTab);
+      clearTimeout(paperResettleTimer);
+      // 用紙幅のCSS transition（0.18秒）完了時点でも測り直す。
+      paperResettleTimer = setTimeout(queuePagination, 260);
+    }
     if (save) scheduleSave();
   }
 
@@ -748,9 +952,9 @@
     saveTimer = setTimeout(saveDocument, 500);
   }
 
-  function saveDocument() {
+  function collectDocumentData() {
     syncActiveTab();
-    const data = {
+    return {
       title: title.value,
       tabs,
       activeTabId,
@@ -763,7 +967,132 @@
       marginGuidesVisible,
       updatedAt: new Date().toISOString()
     };
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+  }
+
+  function saveDocument() {
+    clearTimeout(saveTimer);
+    saveTimer = null;
+    if (isComposing) return;
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(collectDocumentData()));
+      saveState.textContent = '保存済み';
+      return true;
+    } catch (error) {
+      console.error('ローカル自動保存に失敗:', error);
+      saveState.textContent = '保存失敗（原稿ファイルを保存してください）';
+      return false;
+    }
+  }
+
+  function saveProjectFile() {
+    const data = collectDocumentData();
+    const project = { format: PROJECT_FORMAT, formatVersion: PROJECT_VERSION, ...data };
+    downloadBlob(new Blob([JSON.stringify(project, null, 2)], { type: 'application/json;charset=utf-8' }), `${safeFilename()}.tategaki.json`);
+    saveDocument();
+  }
+
+  function openProjectFile() {
+    $('openProjectInput').value = '';
+    $('openProjectInput').click();
+  }
+
+  function sanitizePageHtml(html) {
+    const template = document.createElement('template');
+    template.innerHTML = String(html || '');
+    const forbidden = ['script','style','iframe','object','embed','link','meta','base','svg','math','form','input','button','textarea','select','audio','video'];
+    template.content.querySelectorAll(forbidden.join(',')).forEach(node => node.remove());
+    for (const node of template.content.querySelectorAll('*')) {
+      for (const attribute of [...node.attributes]) {
+        const key = attribute.name.toLowerCase();
+        const value = attribute.value;
+        if (key === 'style') {
+          if (/url\s*\(|expression\s*\(|@import|\\/i.test(value)) node.removeAttribute('style');
+          continue;
+        }
+        if (key === 'data-latin-orientation' && ['mixed','upright'].includes(value)) continue;
+        if (key === 'data-tategaki-manual-page-start' && value === 'true') continue;
+        if (key === 'contenteditable' && value === 'false' && node.hasAttribute('data-tategaki-manual-page-start')) continue;
+        if (key === 'size' && node.tagName === 'FONT') continue;
+        // 書式クラス、外部リンク、イベント属性は読み込み時に許可しない。
+        node.removeAttribute(attribute.name);
+      }
+    }
+    return template.innerHTML;
+  }
+
+  function normalizeProjectData(input) {
+    if (!input || typeof input !== 'object' || input.format !== PROJECT_FORMAT || input.formatVersion !== PROJECT_VERSION) {
+      throw new Error('縦書きドキュメントの原稿ファイルではありません。');
+    }
+    if (!Array.isArray(input.tabs) || !input.tabs.length || input.tabs.length > 300) {
+      throw new Error('原稿のタブ情報が不正です。');
+    }
+    const cloned = { ...input, title: String(input.title || '無題のドキュメント').slice(0, 200) };
+    cloned.tabs = input.tabs.map((tab, index) => {
+      if (!tab || typeof tab.html !== 'string' || tab.html.length > 15_000_000) throw new Error('本文データが不正です。');
+      return {
+        id: String(tab.id || `imported-tab-${index + 1}`),
+        name: String(tab.name || `タブ${index + 1}`).slice(0, 150),
+        html: splitStoredPages(tab.html).map(sanitizePageHtml).join(PAGE_BREAK)
+      };
+    });
+    return cloned;
+  }
+
+  async function importProjectFile(file) {
+    if (!file) return;
+    if (file.size > 30 * 1024 * 1024) { alert('ファイルが大きすぎます（上限30MB）。'); return; }
+    let data;
+    try {
+      data = normalizeProjectData(JSON.parse(await file.text()));
+    } catch (error) {
+      alert(`原稿を読み込めませんでした。\n${error.message}`);
+      return;
+    }
+    if (!confirm('現在の原稿を、選択したファイルの内容に置き換えますか？\n現在の原稿を残す場合は、先に「原稿ファイルを保存」してください。')) return;
+    if (layoutFrame !== null) { cancelAnimationFrame(layoutFrame); layoutFrame = null; }
+    clearTimeout(compositionLayoutTimer);
+    clearTimeout(saveTimer);
+    applyDocumentData(data);
+    // 先に復元処理で発生する再組版を終わらせてから自動保存。
+    requestAnimationFrame(() => { paginateAllPages({ preserveCaret: false }); saveDocument(); });
+  }
+
+  $('openProjectInput').addEventListener('change', (e) => importProjectFile(e.target.files?.[0]));
+
+  function applyDocumentData(data) {
+    title.value = data.title || '無題のドキュメント';
+    if (Array.isArray(data.tabs) && data.tabs.length) {
+      tabs = data.tabs.map((tab, index) => ({
+        id: tab.id || `tab-restored-${index + 1}`,
+        name: tab.name || `タブ${index + 1}`,
+        html: tab.html || ''
+      }));
+      activeTabId = tabs.some(t => t.id === data.activeTabId) ? data.activeTabId : tabs[0].id;
+    } else {
+      const first = createTab('タブ1', data.html || '');
+      tabs = [first];
+      activeTabId = first.id;
+    }
+    currentDirection = data.direction === 'horizontal' ? 'horizontal' : 'vertical';
+    currentLatinOrientation = data.latinOrientation === 'upright' ? 'upright' : 'mixed';
+    currentPaperSize = PAPER_SIZES[data.paperSize] ? data.paperSize : 'A4';
+    currentPaperOrientation = data.paperOrientation === 'landscape' ? 'landscape' : 'portrait';
+    const m = data.margins || {};
+    currentMargins = {
+      top: Number.isFinite(Number(m.top)) ? Number(m.top) : 18,
+      bottom: Number.isFinite(Number(m.bottom)) ? Number(m.bottom) : 18,
+      left: Number.isFinite(Number(m.left)) ? Number(m.left) : 18,
+      right: Number.isFinite(Number(m.right)) ? Number(m.right) : 18
+    };
+    marginGuidesVisible = data.marginGuidesVisible !== false;
+    const active = tabs.find(t => t.id === activeTabId) || tabs[0];
+    loadActiveTabPages(active.html || '');
+    applyDirection();
+    applyPaperSettings({ save: false, repaginate: false });
+    setZoom(data.zoom || 1);
+    applyMarginGuideVisibility();
+    updateCount();
     saveState.textContent = '保存済み';
   }
 
@@ -792,37 +1121,7 @@
         return;
       }
 
-      title.value = data.title || '無題のドキュメント';
-      if (Array.isArray(data.tabs) && data.tabs.length) {
-        tabs = data.tabs.map((tab, index) => ({
-          id: tab.id || `tab-restored-${index + 1}`,
-          name: tab.name || `タブ${index + 1}`,
-          html: tab.html || ''
-        }));
-        activeTabId = tabs.some(t => t.id === data.activeTabId) ? data.activeTabId : tabs[0].id;
-      } else {
-        const first = createTab('タブ1', data.html || '');
-        tabs = [first];
-        activeTabId = first.id;
-      }
-      currentDirection = data.direction === 'horizontal' ? 'horizontal' : 'vertical';
-      currentLatinOrientation = data.latinOrientation === 'upright' ? 'upright' : 'mixed';
-      currentPaperSize = PAPER_SIZES[data.paperSize] ? data.paperSize : 'A4';
-      currentPaperOrientation = data.paperOrientation === 'landscape' ? 'landscape' : 'portrait';
-      const m = data.margins || {};
-      currentMargins = {
-        top: Number.isFinite(Number(m.top)) ? Number(m.top) : 18,
-        bottom: Number.isFinite(Number(m.bottom)) ? Number(m.bottom) : 18,
-        left: Number.isFinite(Number(m.left)) ? Number(m.left) : 18,
-        right: Number.isFinite(Number(m.right)) ? Number(m.right) : 18
-      };
-      marginGuidesVisible = data.marginGuidesVisible !== false;
-      const active = tabs.find(t => t.id === activeTabId) || tabs[0];
-      loadActiveTabPages(active.html || '');
-      applyDirection();
-      applyPaperSettings({ save: false, repaginate: false });
-      setZoom(data.zoom || 1);
-      applyMarginGuideVisibility();
+      applyDocumentData(data);
       if (migrated) saveDocument();
       saveState.textContent = '保存済み';
       updateCount();
@@ -1294,9 +1593,10 @@ h1{font-size:20pt}h2{font-size:16pt}blockquote{border-inline-start:3px solid #99
 
   document.addEventListener('keydown', (e) => {
     const mod = e.ctrlKey || e.metaKey;
-    if (mod && e.key.toLowerCase() === 's') { e.preventDefault(); saveDocument(); }
+    if (mod && e.key.toLowerCase() === 's') { e.preventDefault(); saveProjectFile(); }
+    if (mod && e.key.toLowerCase() === 'o') { e.preventDefault(); openProjectFile(); }
     if (mod && e.key.toLowerCase() === 'f') { e.preventDefault(); openFind(); }
-    if (mod && e.key === 'Enter') { e.preventDefault(); insertPageBreak(); }
+    if (!isComposing && !e.isComposing && mod && e.key === 'Enter') { e.preventDefault(); insertPageBreak(); }
     if (mod && e.altKey && e.key.toLowerCase() === 'n') { e.preventDefault(); newDocument(); }
   });
 
