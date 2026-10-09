@@ -12,8 +12,8 @@
   const paperState = $('paperState');
   const menuPanel = $('menuPanel');
   const tabsList = $('tabsList');
-  const STORAGE_KEY = 'tategaki-docs-v005';
-  const LEGACY_STORAGE_KEYS = ['tategaki-docs-v004', 'tategaki-docs-v003', 'tategaki-docs-v002', 'tategaki-docs-v001'];
+  const STORAGE_KEY = 'tategaki-docs-v006';
+  const LEGACY_STORAGE_KEYS = ['tategaki-docs-v005', 'tategaki-docs-v004', 'tategaki-docs-v003', 'tategaki-docs-v002', 'tategaki-docs-v001'];
   const PAGE_BREAK = '<!--TATEGAKI_PAGE_BREAK-->';
   let saveTimer = null;
   let currentDirection = 'vertical';
@@ -21,6 +21,7 @@
   let currentPaperSize = 'A4';
   let currentPaperOrientation = 'portrait';
   let currentMargins = { top: 18, bottom: 18, left: 18, right: 18 };
+  let marginGuidesVisible = true;
   let isPaginating = false;
   let lastFindIndex = -1;
   let tabs = [];
@@ -59,14 +60,15 @@
       ['縦書き / 横書き 切替', '', toggleDirection],
       ['英字の向き 切替', '', toggleLatinOrientation],
       ['sep'],
-      ['A4', '', () => setPaperSize('A4')],
-      ['A5', '', () => setPaperSize('A5')],
-      ['B5', '', () => setPaperSize('B5')],
-      ['B6', '', () => setPaperSize('B6')],
-      ['Letter', '', () => setPaperSize('LETTER')],
+      ['A4（210mm×297mm）', '', () => setPaperSize('A4')],
+      ['A5（148mm×210mm）', '', () => setPaperSize('A5')],
+      ['B5（182mm×257mm）', '', () => setPaperSize('B5')],
+      ['B6（128mm×182mm）', '', () => setPaperSize('B6')],
+      ['Letter（215.9mm×279.4mm）', '', () => setPaperSize('LETTER')],
       ['sep'],
       ['用紙を縦長にする', '', () => setPaperOrientation('portrait')],
       ['用紙を横長にする', '', () => setPaperOrientation('landscape')],
+      ['余白範囲 表示/非表示', '', toggleMarginGuides],
       ['sep'],
       ['75%', '', () => setZoom(.75)],
       ['100%', '', () => setZoom(1)],
@@ -495,9 +497,22 @@
     const { height } = getPaperDimensions();
     const cssPxPerMm = 96 / 25.4;
     const paperHeightPx = height * cssPxPerMm;
-    const pageCount = Math.max(1, getPagePapers().length);
-    const marginBottom = Math.max(0, (value - 1) * paperHeightPx * pageCount);
-    $('paperStage').style.paddingBottom = `${60 + marginBottom}px`;
+    const extraPerPage = Math.max(0, (value - 1) * paperHeightPx);
+    const papers = getPagePapers();
+    papers.forEach((pageEl, index) => {
+      pageEl.style.marginBottom = index < papers.length - 1 ? `${extraPerPage}px` : '0px';
+    });
+    $('paperStage').style.paddingBottom = `${60 + extraPerPage}px`;
+  }
+
+  function applyMarginGuideVisibility() {
+    document.body.classList.toggle('show-margin-guides', marginGuidesVisible);
+  }
+
+  function toggleMarginGuides() {
+    marginGuidesVisible = !marginGuidesVisible;
+    applyMarginGuideVisibility();
+    scheduleSave();
   }
 
   function toggleDirection() {
@@ -688,6 +703,7 @@
       paperSize: currentPaperSize,
       paperOrientation: currentPaperOrientation,
       margins: currentMargins,
+      marginGuidesVisible,
       updatedAt: new Date().toISOString()
     };
     localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
@@ -715,6 +731,7 @@
         applyPaperSettings({ save: false, repaginate: false });
         setZoom(1);
         renderTabs();
+        applyMarginGuideVisibility();
         return;
       }
 
@@ -742,11 +759,13 @@
         left: Number.isFinite(Number(m.left)) ? Number(m.left) : 18,
         right: Number.isFinite(Number(m.right)) ? Number(m.right) : 18
       };
+      marginGuidesVisible = data.marginGuidesVisible !== false;
       const active = tabs.find(t => t.id === activeTabId) || tabs[0];
       loadActiveTabPages(active.html || '');
       applyDirection();
       applyPaperSettings({ save: false, repaginate: false });
       setZoom(data.zoom || 1);
+      applyMarginGuideVisibility();
       if (migrated) saveDocument();
       saveState.textContent = '保存済み';
       updateCount();
@@ -760,6 +779,7 @@
       applyDirection();
       applyPaperSettings({ save: false, repaginate: false });
       renderTabs();
+      applyMarginGuideVisibility();
     }
   }
 

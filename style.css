@@ -231,3 +231,30 @@ button { color: inherit; }
   .pages-container { align-items: flex-start; }
   .margin-grid { grid-template-columns: 1fr; }
 }
+
+
+/* v006: margin guide visibility and vertically stacked multi-page display */
+.paper { position: relative; }
+body.show-margin-guides .paper::after {
+  content: '';
+  position: absolute;
+  top: var(--margin-top, 18mm);
+  right: var(--margin-right, 18mm);
+  bottom: var(--margin-bottom, 18mm);
+  left: var(--margin-left, 18mm);
+  border: 1px dashed rgba(24, 134, 75, .28);
+  pointer-events: none;
+  z-index: 2;
+}
+.pages-container {
+  flex-direction: column !important;
+  align-items: center;
+  width: max-content;
+  min-width: 100%;
+}
+@media (max-width: 760px) {
+  .pages-container { align-items: flex-start; }
+}
+@media print {
+  body.show-margin-guides .paper::after { display: none !important; }
+}
